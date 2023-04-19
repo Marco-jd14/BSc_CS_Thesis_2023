@@ -1,0 +1,7 @@
+# ignore SQL database
+*.sql
+
+# ignore saved plots
+*.png
+*.jpg
+*.jpeg
