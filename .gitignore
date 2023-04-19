@@ -1,7 +1,8 @@
 # ignore SQL database
 *.sql
 
-# ignore saved plots
-*.png
-*.jpg
-*.jpeg
+# ignore compiled python files in pycache folder
+__pycache__/
+
+# folders
+plots/
