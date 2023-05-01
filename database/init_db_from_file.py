@@ -5,10 +5,9 @@ Created on Wed Apr 19 13:38:48 2023
 @author: Marco
 """
 
-import mysql.connector
+import sqlalchemy
 import sys
 import regex as re
-import pandas as pd
 from copy import copy
 import connect_db
 import datetime as dt
@@ -38,10 +37,10 @@ def parse_sql_file():
     return sql_commands
 
 
-def execute_drop_table_commands(cursor, drop_table_commands, verbose=False):
-    execute_create_table_commands(cursor, drop_table_commands, verbose)
+def execute_drop_table_commands(db, drop_table_commands, verbose=False):
+    execute_create_table_commands(db, drop_table_commands, verbose)
 
-def execute_create_table_commands(cursor, create_table_commands, verbose=False):
+def execute_create_table_commands(db, create_table_commands, verbose=False):
     """ When executing CREATE TABLE commands in the same order as parsed from the file,
     this could lead to REFERENCE-errors, i.e. a table wants to reference a second table
     which has not been created yet.
@@ -75,17 +74,18 @@ def execute_create_table_commands(cursor, create_table_commands, verbose=False):
 
             # Try to execute the command
             try:
-                cursor.execute(command)
+                db.execute(command)
                 # Upon success, add the command to the execution_order list
                 execution_order_of_table_creation_commands.append(command)
-            except mysql.connector.Error as e:
-                if e.errno == 1824 or e.errno == 3730: 
+            except sqlalchemy.exc.SQLAlchemyError as e:
+                errno = int(str(e.orig).split()[0].strip("(,"))
+                if errno == 1824 or errno == 3730: 
                     # 1824 is the error-number for: Failed to open the referenced table 'table-name'
                     # 3739 is the error-number for: Cannot drop table 'table-name' referenced by a foreign key constraint
                     unsuccessful_commands.append(command)
                     if verbose:
                         print("\nCommand could not be executed successfully, and will be retried later")
-                        print(e.errno, e.msg)
+                        print(e.orig)
                 else:
                     # Do not know how to handle other errors.
                     raise
@@ -146,7 +146,7 @@ def progress_bar(index, total, current_item):
     print("\r[%s%d/%d] %s"%(zero_padding, index, total, current_item + " "*100), end='')
 
 
-def execute_commands(cursor, commands):
+def execute_commands(db, commands):
     """ Executes commands from a list to a database-cursor
     """
     # Execute every command from the input file
@@ -157,11 +157,12 @@ def execute_commands(cursor, commands):
         # Try to execute the command
         success = False
         try:
-            cursor.execute(command)
+            db.execute(command)
             success = True
         except Exception as e:
             print("\nCommand could not be executed successfully")
-            print(e.errno, e.msg)
+            try:  print(e.errno, e.msg)
+            except: print(e)
 
         # Stop if an error was encountered
         if not success:
@@ -172,7 +173,6 @@ def execute_commands(cursor, commands):
 def execute_commands_from_sql_file(db):
     """ Function that applies commands from a local .sql file to a specified database 'db'
     """
-    cursor = db.cursor()
 
     # Split the .sql file up into a list of commands
     sql_commands = parse_sql_file()
@@ -186,13 +186,13 @@ def execute_commands_from_sql_file(db):
     # First execute all DROP TABLE-commands
     print("\nDropping existing tables")
     start_time = dt.datetime.now()
-    execute_drop_table_commands(cursor, drop_table_commands)
+    execute_drop_table_commands(db, drop_table_commands)
     print("\nSuccesfully dropped all existing tables, took %d.%d seconds"%((dt.datetime.now()-start_time).total_seconds(), (dt.datetime.now()-start_time).microseconds))
 
     # Then execute all CREATE TABLE-commands
     print("\nCreating new tables")
     start_time = dt.datetime.now()
-    execution_order_of_table_creation_commands = execute_create_table_commands(cursor, create_table_commands)
+    execution_order_of_table_creation_commands = execute_create_table_commands(db, create_table_commands)
     print("\nSuccesfully created all the tables, took %d.%d seconds"%((dt.datetime.now()-start_time).total_seconds(), (dt.datetime.now()-start_time).microseconds))
 
     # Order the remaining commands in the same order as in which the tables were created
@@ -202,14 +202,8 @@ def execute_commands_from_sql_file(db):
     # Execute the remaining commands
     print("\nExecuting the remaining commands")
     start_time = dt.datetime.now()
-    execute_commands(cursor, ordered_remaining_sql_commands)
+    execute_commands(db, ordered_remaining_sql_commands)
     print("Succesfully executed all remaining commands, took %d.%d seconds"%((dt.datetime.now()-start_time).total_seconds(), (dt.datetime.now()-start_time).microseconds))
-
-    # Commit the changes to the database
-    db.commit()
-
-    # Close the cursor
-    cursor.close()
 
 
 def main():
@@ -218,7 +212,7 @@ def main():
     # Establish connection to the database
     conn = connect_db.establish_host_connection()
     db   = connect_db.establish_database_connection(conn, overwrite=overwrite_existing_database)
-    print("Successfully connected to database '%s'"%db.database)
+    print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
 
     # Parse the SQL file, then execute the commands in it
     execute_commands_from_sql_file(db)

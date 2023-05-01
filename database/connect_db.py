@@ -6,11 +6,11 @@ Created on Mon May  1 11:59:50 2023
 """
 
 import sys
-import mysql.connector
+import sqlalchemy
 
 
 HOST_ARGS = {
-    'user'     : 'root',
+    'username' : 'root',
     'password' : 'V3ryStrongP@ssw0rd!',
     'host'     : 'localhost'
 }
@@ -22,14 +22,16 @@ def mysql_connect(host_args, database_name=None):
     """
     connection, err_msg = None, None
 
+    # driver = 'mysqldb' # This is the preferred driver, but it does not work well with unescaped '%' in raw string text
+    driver = 'mysqlconnector'
     try:
-        if database_name is not None:
-            connection = mysql.connector.connect(**host_args, database=database_name)
-        else:
-            connection = mysql.connector.connect(**host_args)
+        # Connect with SQL Alchemy, as this is the preferred way for pandas to query the database
+        connection_url = sqlalchemy.engine.URL.create("mysql+%s"%driver, **host_args, database=database_name)
+        engine = sqlalchemy.create_engine(connection_url)
+        connection = engine.connect()
 
-    except mysql.connector.Error as e:
-        err_msg = str(e.errno) + " " + e.msg
+    except sqlalchemy.exc.SQLAlchemyError as e:
+        err_msg = str(e.orig).strip("()")
     except Exception as e:
         err_msg = str(type(e))[len("<class '"):-2] + ": " + str(e)
 
@@ -56,16 +58,15 @@ def establish_database_connection(connection, overwrite=False):
     """
 
     assert ' ' not in DATABASE_NAME, "Spaces are not allowed in the name of a database"
-    cursor = connection.cursor()
 
     if overwrite:
         # Delete the database if it already exists
         print("Deleting existing database %s"%DATABASE_NAME)
-        cursor.execute('drop database if exists %s'%DATABASE_NAME)
+        connection.execute('drop database if exists %s'%DATABASE_NAME)
 
     # Create database if it does not exist
-    cursor.execute('create database if not exists %s'%DATABASE_NAME)
-    cursor.close()
+    connection.execute('create database if not exists %s'%DATABASE_NAME)
+    connection.close()
 
     # Establish connection to a provided DATABASE_NAME
     db, err_msg = mysql_connect(HOST_ARGS, DATABASE_NAME)
@@ -76,3 +77,9 @@ def establish_database_connection(connection, overwrite=False):
         sys.exit(0)
 
     return db
+
+
+if __name__ == '__main__':
+    conn = establish_host_connection()
+    db   = establish_database_connection(conn, overwrite=False)
+    print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
