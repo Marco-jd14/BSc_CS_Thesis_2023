@@ -9,70 +9,12 @@ import mysql.connector
 import sys
 import regex as re
 import pandas as pd
-from pprint import pprint
 from copy import copy
+import connect_db
 
-HOST_ARGS = {
-    'user'     : 'root',
-    'password' : 'V3ryStrongP@ssw0rd!',
-    'host'     : 'localhost'
-}
-DATABASE_NAME = 'quiet_nl'
 
 SQL_DB_PATH = "./quiet_2023-04-19.sql"
 
-
-def mysql_connect(host_args, database=None):
-    connection, err_msg = None, None
-
-    try:
-        if database is not None:
-            connection = mysql.connector.connect(**host_args, database=database)
-        else:
-            connection = mysql.connector.connect(**host_args)
-
-    except mysql.connector.Error as e:
-        err_msg = str(e.errno) + " " + e.msg
-    except Exception as e:
-        err_msg = str(type(e))[len("<class '"):-2] + ": " + str(e)
-
-    return connection, err_msg
-
-
-def establish_host_connection():
-    # Establish connection with provided user-name, password, and host
-    connection, err_msg = mysql_connect(HOST_ARGS)
-
-    if err_msg is not None:
-        print(err_msg)
-        print("Could not establish a connection to MySQL. Please make sure you have " + \
-              "correctly specified the user-name and password, and the host address")
-        sys.exit(0)
-
-    return connection
-
-
-def establish_database_connection(connection, overwrite=False):
-    cursor = connection.cursor()
-
-    if overwrite:
-        # Delete the database if it already exists
-        print("Deleting existing database %s"%DATABASE_NAME)
-        cursor.execute('drop database if exists %s'%DATABASE_NAME)
-
-    # Create database if it does not exist
-    cursor.execute('create database if not exists %s'%DATABASE_NAME)
-    cursor.close()
-
-    # Establish connection to a provided DATABASE_NAME
-    db, err_msg = mysql_connect(HOST_ARGS, DATABASE_NAME)
-
-    if err_msg is not None:
-        print(err_msg)
-        print("Could not establish a connection to the MySQL database '%s'"%DATABASE_NAME)
-        sys.exit(0)
-
-    return db
 
 
 def parse_sql_file():
@@ -225,16 +167,15 @@ def initialize_new_db_from_scratch(db):
 def main():
     make_new_db_from_scratch = False
 
-    connection = establish_host_connection()
-    assert ' ' not in DATABASE_NAME, "Spaces are not allowed in the name of a database"
+    connection = connect_db.establish_host_connection()
 
     if make_new_db_from_scratch:
-        db = establish_database_connection(connection, overwrite=True)
-        print("Successfully connected to database '%s'"%DATABASE_NAME)
+        db = connect_db.establish_database_connection(connection, overwrite=True)
+        print("Successfully connected to database '%s'"%connect_db.DATABASE_NAME)
         initialize_new_db_from_scratch(db)
     else:
-        db = establish_database_connection(connection, overwrite=False)
-        print("Successfully connected to database '%s'"%DATABASE_NAME)
+        db = connect_db.establish_database_connection(connection, overwrite=False)
+        print("Successfully connected to database '%s'"%connect_db.DATABASE_NAME)
 
         cursor = db.cursor()
         query = "SELECT * FROM category;"
