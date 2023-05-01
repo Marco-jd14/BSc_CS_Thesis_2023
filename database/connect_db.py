@@ -18,6 +18,8 @@ DATABASE_NAME = 'quiet_nl'
 
 
 def mysql_connect(host_args, database_name=None):
+    """ Helper function that connects to a certain host, with a database_name as optional argument
+    """
     connection, err_msg = None, None
 
     try:
@@ -35,6 +37,8 @@ def mysql_connect(host_args, database_name=None):
 
 
 def establish_host_connection():
+    """ Establish a connection to a host specified in HOST_ARGS
+    """
     # Establish connection with provided user-name, password, and host
     connection, err_msg = mysql_connect(HOST_ARGS)
 
@@ -48,6 +52,8 @@ def establish_host_connection():
 
 
 def establish_database_connection(connection, overwrite=False):
+    """ From an existing host connection, establish a database connection specified in DATABASE_NAME
+    """
 
     assert ' ' not in DATABASE_NAME, "Spaces are not allowed in the name of a database"
     cursor = connection.cursor()
