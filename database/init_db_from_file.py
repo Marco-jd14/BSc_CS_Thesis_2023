@@ -136,7 +136,7 @@ def order_remaining_commands_in_table_creation_order(execution_order_of_table_na
     assert len(ordered_other_sql_commands) == len(remaining_sql_commands), "%d != %d"%(len(ordered_other_sql_commands), len(remaining_sql_commands))
 
     # Pretty-print all the ordered commands until the first opening bracket
-    # pprint(list(map(lambda c: c.split('(')[0].strip(), ordered_other_sql_commands)))
+    # from pprint import pprint; pprint(list(map(lambda c: c.split('(')[0].strip(), ordered_other_sql_commands)))
     return ordered_other_sql_commands
 
 
@@ -203,7 +203,7 @@ def execute_commands_from_sql_file(db):
     print("\nExecuting the remaining commands")
     start_time = dt.datetime.now()
     execute_commands(db, ordered_remaining_sql_commands)
-    print("Succesfully executed all remaining commands, took %d.%d seconds"%((dt.datetime.now()-start_time).total_seconds(), (dt.datetime.now()-start_time).microseconds))
+    print("\nSuccesfully executed all remaining commands, took %d.%d seconds"%((dt.datetime.now()-start_time).total_seconds(), (dt.datetime.now()-start_time).microseconds))
 
 
 def main():

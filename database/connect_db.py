@@ -7,6 +7,7 @@ Created on Mon May  1 11:59:50 2023
 
 import sys
 import sqlalchemy
+import pandas as pd
 
 
 HOST_ARGS = {
@@ -22,11 +23,11 @@ def mysql_connect(host_args, database_name=None):
     """
     connection, err_msg = None, None
 
-    # driver = 'mysqldb' # This is the preferred driver, but it does not work well with unescaped '%' in raw string text
-    driver = 'mysqlconnector'
+    # DRIVER = 'mysqldb' # This is the preferred driver, but it does not work well with unescaped '%' in raw string text
+    DRIVER = 'mysqlconnector'
     try:
         # Connect with SQL Alchemy, as this is the preferred way for pandas to query the database
-        connection_url = sqlalchemy.engine.URL.create("mysql+%s"%driver, **host_args, database=database_name)
+        connection_url = sqlalchemy.engine.URL.create("mysql+%s"%DRIVER, **host_args, database=database_name)
         engine = sqlalchemy.create_engine(connection_url)
         connection = engine.connect()
 
@@ -83,3 +84,11 @@ if __name__ == '__main__':
     conn = establish_host_connection()
     db   = establish_database_connection(conn, overwrite=False)
     print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
+
+    query = "show tables;"
+    result = db.execute(query)
+    df = pd.DataFrame(result.fetchall())
+    print(df)
+
+    db.close()
+    conn.close()
