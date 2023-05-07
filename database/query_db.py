@@ -52,6 +52,51 @@ def plot_created_coupons(df):
     plt.plot(interval_ends, res.nr_coupons_per_interval)
 
 
+def determine_coupon_checked_expiry_time(created_at, accept_time):
+
+    # Check if timestamp is as expected
+    expired = created_at + dt.timedelta(days=accept_time)
+
+    if expired.date() < dt.date(2021, 12, 14):
+        ten_am = dt.time(10, 0, 0)
+        if expired.time() <= ten_am:
+            checked_expiry = dt.datetime.combine(expired.date(), ten_am)
+        else:
+            checked_expiry = dt.datetime.combine(expired.date() + dt.timedelta(days=1), ten_am)
+
+        if checked_expiry.date() == dt.date(2021, 10, 29):
+            return None
+
+        return [checked_expiry]
+        # checked_expiry2 = checked_expiry + dt.timedelta(days=1)
+        # return [checked_expiry, checked_expiry2]
+
+    else:
+        eight_pm = dt.time(20, 0, 0)
+        eight_am = dt.time(8, 0, 0)
+        if expired.time() > eight_pm:
+            checked_expiry = (expired + dt.timedelta(days=1)).replace(hour=8,minute=5)
+            return [checked_expiry]
+            # checked_expiry2 = expired if expired.time() < dt.time(20, 5, 0) else checked_expiry
+            # return [checked_expiry, checked_expiry2]
+
+        elif expired.time() < eight_am:
+            checked_expiry = expired.replace(hour=8,minute=5)
+            return [checked_expiry]
+
+        else:
+            if expired.date() == dt.date(2022, 9, 28):
+                return None
+
+            checked_expiry = expired.replace(minute=5)
+            if expired.minute <= 5:
+                checked_expiry2 = checked_expiry + dt.timedelta(hours=1)
+                return [checked_expiry, checked_expiry2]
+            else:
+                checked_expiry = checked_expiry + dt.timedelta(hours=1)
+                return [checked_expiry]
+
+
 
 relevant_columns = {'coupon': ['id', 'member_id', 'created_at', 'status',
                                'sub_status', 'issue_id', 'redeem_till',
@@ -244,6 +289,19 @@ def main():
             # If a member let the coupon expire or declined the coupon, the status of the coupon
             # has not been updated since this action. Therefore, we know the exact time of the action
             datetimestamp = coupon_row['status_updated_at']
+            TrackTime("Check expected timestamp")
+            checked_expiries = determine_coupon_checked_expiry_time(coupon_row['created_at'], coupon_row['accept_time'])
+            if checked_expiries is None:
+                checked_expiries = [datetimestamp]
+
+            predicted = False
+            for checked_expiry in checked_expiries:
+                if abs(datetimestamp - checked_expiry) < dt.timedelta(minutes=10):
+                    predicted = True
+
+            if not predicted:
+                incorrectly_predicted_created_after_expiry += 1
+                # print("\nCoupon created at: %s, expired at: %s, status updated at:%s"%(coupon_row['created_at'], coupon_row['created_at'] + dt.timedelta(days=coupon_row['accept_time']), datetimestamp))
 
         elif member_response == Event.member_declined:
             datetimestamp = coupon_row['status_updated_at']
