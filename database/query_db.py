@@ -199,6 +199,114 @@ def main():
     filtered_issues.drop(['total_issued'], axis=1, inplace=True)
     filtered_issues = pd.merge(filtered_issues, coupon_counts, left_on='id', right_on='issue_id')
 
+    # Calculate the times it took for members to decline a coupon.
+    declined_coupons = filtered_coupons[np.logical_and(filtered_coupons['status'] == 'declined', filtered_coupons['sub_status'] != "after_accepting")]
+    declined_durations = declined_coupons['status_updated_at'] - declined_coupons['created_at']
+    print("\nDeclined coupons:", len(declined_coupons), declined_durations.mean(), "\n")
+
+    # Store the following information during the event-generation in a dict (not df) for optimization:
+    issue_info = pd.DataFrame(index=filtered_issues['id'])
+    issue_info['nr_accepted_so_far'] = 0
+    issue_info['nr_issued_so_far']   = 0
+    issue_info = issue_info.to_dict('index')
+
+    # Set the index of the filtered_issues to the issue_id, for easy access during event-generation
+    filtered_issues.index = filtered_issues['id']
+
+    # To measure how well the function 'determine_coupon_checked_expiry_time' calculates the actual 'status_updated_at' time after a member letting a coupon expire
+    incorrectly_predicted_created_after_expiry = 0
+    events_list = []
+    events_df = pd.DataFrame(columns=['event','at','member_id','coupon_id','issue_id','offer_id','coupon_count'])
+
+    for i, (index, coupon_row) in enumerate(filtered_coupons.iterrows()):
+
+        TrackTime("print")
+        if i%1000 == 0:
+            print("\rHandling coupon nr %d"%i,end='')
+
+        TrackTime("append")
+        ids_in_event = [coupon_row['member_id'], coupon_row['id'], coupon_row['issue_id'], coupon_row['offer_id']]
+
+        event = [Event.coupon_sent, coupon_row['created_at']] + ids_in_event + [1]
+        events_list.append(event)
+
+        TrackTime('check time')
+        if issue_info[coupon_row['issue_id']]['nr_issued_so_far'] == 0:
+            issue_sent_at = filtered_issues.loc[coupon_row['issue_id'],'sent_at']
+            assert abs(coupon_row['created_at'] - issue_sent_at) < dt.timedelta(seconds=30), "Issue was sent at %s, but first coupon created at %s"%(coupon_row['created_at'], issue_sent_at)
+
+        TrackTime("update issue_info")
+        issue_info[coupon_row['issue_id']]['nr_issued_so_far'] += 1
+
+        TrackTime("timestamp")
+        member_response = coupon_row['member_response'] # status_to_event[(status, sub_status)]
+        if member_response == Event.member_let_expire:
+            # If a member let the coupon expire or declined the coupon, the status of the coupon
+            # has not been updated since this action. Therefore, we know the exact time of the action
+            datetimestamp = coupon_row['status_updated_at']
+
+        elif member_response == Event.member_declined:
+            datetimestamp = coupon_row['status_updated_at']
+            # TODO: check if next coupon is sent at same time as declined
+        else:
+            # If the member accepts the coupon, this tatus will eventually be updated by i.e. redeemed
+            # Therefore, make a random guess as to when the member accepted.
+            # Assume the time for accepting has the same distribution as the time for declining
+
+            # TODO: filter declined_durations <= accept_time
+            TrackTime("random datetimestamp")
+            index = np.random.randint(len(declined_durations))
+            accepted_duration = declined_durations.iloc[index]
+            datetimestamp = coupon_row['created_at'] + accepted_duration
+
+        TrackTime("append")
+        event = [member_response, datetimestamp] + ids_in_event + [1]
+        events_list.append(event)
+
+        TrackTime("update issue_info")
+        if member_response == Event.member_accepted:
+            # filtered_issues.loc[coupon_row['issue_id'],'nr_accepted_so_far'] += 1
+            issue_info[coupon_row['issue_id']]['nr_accepted_so_far'] += 1
+
+        # TODO: check of er nog coupons uitgegeven worden nadat iemand declined after accepting
+        # TODO: check op 'amount' dmv events
+        # check of event coupon_expired heeft plaatsgevonden
+        TrackTime("check coupon expiry")
+        if member_response != Event.member_accepted:
+
+            if issue_info[coupon_row['issue_id']]['nr_issued_so_far'] == filtered_issues.loc[coupon_row['issue_id'], 'total_issued']:
+
+                # This coupon_row is the last row in which a coupon with this issue_id appears
+                decay_nr = filtered_issues.loc[coupon_row['issue_id'],'amount'] - issue_info[coupon_row['issue_id']]['nr_accepted_so_far']
+
+                if decay_nr > 0:
+                    TrackTime("append")
+                    event = [Event.coupon_expired, filtered_issues.loc[coupon_row['issue_id'],'expires_at'], np.nan, np.nan, coupon_row['issue_id'], coupon_row['offer_id'], decay_nr]
+                    events_list.append(event)
+
+    print("\nincorrectly_predicted_created_after_expiry:", incorrectly_predicted_created_after_expiry)
+
+    print("\n")
+    events_df = pd.DataFrame(events_list, columns=['event','at','member_id','coupon_id','issue_id','offer_id','coupon_count'])
+    events_df['index'] = events_df.index
+    events_df.sort_values(['at','index'], inplace=True)
+    events_df.drop('index', axis=1, inplace=True)
+    events_df = events_df.convert_dtypes()
+    print(events_df)
+    print(events_df.dtypes)
+
+    print("")
+    total_decay  = np.sum(events_df['coupon_count'][events_df['event'] == Event.coupon_expired])
+    total_amount = np.sum(filtered_issues['amount'])
+    print('Total number of coupons: %d'%total_amount)
+    print('Total number of coupons never accepted: %d'%total_decay)
+    print('Percentage of coupons never accepted: %.3f%%'%(total_decay/total_amount))
+    # sys.exit()
+
+    print("")
+    TrackReport()
+    sys.exit()
+
 
     tables = ['coupon', 'issue', 'offer', 'member']
     # tables = pd.read_sql_query("show tables", db).squeeze().values
