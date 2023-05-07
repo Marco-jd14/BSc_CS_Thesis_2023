@@ -126,30 +126,39 @@ status_to_event = {('declined', None):              Event.member_declined,
 
 
 def filter_coupons_issues_and_offers(all_coupons, all_issues, all_offers):
+    # Filter non-lottery coupons
     non_lottery_coupons = all_coupons[all_coupons['type'] == 'Coupon']
 
+    # Filter on coupons within a certain horizon
     date_before = dt.datetime(2022, 12, 31)
     date_after  = dt.datetime(2021, 1, 1)
     horizon_coupons = non_lottery_coupons[non_lottery_coupons['created_at'] <= date_before]
     horizon_coupons = horizon_coupons[horizon_coupons['created_at'] >= date_after]
 
+    # Consistency check
     filtered_coupons = horizon_coupons
     filtered_out_coupons = all_coupons[~all_coupons['id'].isin(filtered_coupons['id'])]
     assert len(filtered_coupons) + len(filtered_out_coupons) == len(all_coupons)
 
+    # Compute issues that do not have any coupons that got filtered out
     issues_in_filtered_coupons     = all_issues[all_issues['id'].isin(filtered_coupons['issue_id'])]
     issues_in_filtered_out_coupons = all_issues[all_issues['id'].isin(filtered_out_coupons['issue_id'])]
     issues_with_all_coupons_in_filtered_coupons = issues_in_filtered_coupons[~issues_in_filtered_coupons['id'].isin(issues_in_filtered_out_coupons['id'])]
 
+    # Only keep coupons that belong to issues that do not have any coupons that got filtered out
     filtered_coupons = filtered_coupons[filtered_coupons['issue_id'].isin(issues_with_all_coupons_in_filtered_coupons['id'])]
     filtered_out_coupons = all_coupons[~all_coupons['id'].isin(filtered_coupons['id'])]
-    assert len(all_issues[all_issues['id'].isin(filtered_out_coupons['issue_id'])]) == len(issues_in_filtered_out_coupons), "The number of filtered out coupons has somehow changed"
+    # Check if we indeed did not remove any extra issues by filtering out extra coupons
+    assert len(all_issues[all_issues['id'].isin(filtered_out_coupons['issue_id'])]) == len(issues_in_filtered_out_coupons), "The number of filtered out issues has somehow changed"
 
+    # Filter out offers that do not appear in the coupons table
     offers_in_filtered_coupons = all_offers[all_offers['id'].isin(filtered_coupons['offer_id'])]
 
+    # Define the final filtered_issues and filtered_offers tables
     filtered_issues = issues_with_all_coupons_in_filtered_coupons
     filtered_offers = offers_in_filtered_coupons
-    
+
+    # Make a copy of the dataframes, such that in the future we do not risk changing all_coupons, all_issues, or all_offers
     filtered_coupons = copy.copy(filtered_coupons)
     filtered_issues  = copy.copy(filtered_issues)
     filtered_offers  = copy.copy(filtered_offers)
@@ -184,15 +193,37 @@ def perform_data_checks(all_coupons, filtered_coupons, filtered_issues, filtered
 
     # Update the 'total_issued' column from the issue table
     coupon_counts = filtered_coupons[['issue_id']].groupby('issue_id').aggregate(total_issued=('issue_id','count')).reset_index()
-    issues_not_in_coupons_table = filtered_issues[~filtered_issues['id'].isin(coupon_counts['issue_id'])]
     # To be able to join all issue_ids, make sure that the set of issue_ids is the same in both tables
+    issues_not_in_coupons_table = filtered_issues[~filtered_issues['id'].isin(coupon_counts['issue_id'])]
     zero_coupon_counts = pd.DataFrame(issues_not_in_coupons_table['id'].values, columns=['issue_id'])
     zero_coupon_counts['total_issued'] = 0
     coupon_counts = pd.concat([coupon_counts, zero_coupon_counts])
-    assert set(coupon_counts['issue_id']) == set(filtered_issues['id'])
-    # Drop the outdated 'total_issued' column, and merge tables to update the total_issued' column
+    # Drop the outdated 'total_issued' column, and merge tables to update the 'total_issued' column
     filtered_issues.drop(['total_issued'], axis=1, inplace=True)
+    # Join the tables
+    assert set(coupon_counts['issue_id']) == set(filtered_issues['id'])
     filtered_issues = pd.merge(filtered_issues, coupon_counts, left_on='id', right_on='issue_id')
+
+    # Make new column 'total_accepted' in the issue table
+    accepted_coupons = filtered_coupons[filtered_coupons['member_response'] == Event.member_accepted]
+    nr_accepted_coupons_per_issue = accepted_coupons[['issue_id']].groupby('issue_id').aggregate(total_accepted=('issue_id','count')).reset_index()
+    # To be able to join all issue_ids, make sure that the set of issue_ids is the same in both tables
+    issues_not_in_accepted_table = filtered_issues[~filtered_issues['id'].isin(nr_accepted_coupons_per_issue['issue_id'])]
+    issues_with_zero_accepted_coupons = pd.DataFrame(issues_not_in_accepted_table['id'].values, columns=['issue_id'])
+    issues_with_zero_accepted_coupons['total_accepted'] = 0
+    nr_accepted_coupons_per_issue = pd.concat([nr_accepted_coupons_per_issue, issues_with_zero_accepted_coupons])
+    # Join the tables
+    assert set(nr_accepted_coupons_per_issue['issue_id']) == set(filtered_issues['id'])
+    filtered_issues = pd.merge(filtered_issues, nr_accepted_coupons_per_issue, left_on='id', right_on='issue_id')
+
+    # Calculate issues with negative decay (which should be impossible)
+    filtered_issues['my_decay'] = filtered_issues['amount'] - filtered_issues['total_accepted']
+    issues_with_negative_decay = filtered_issues[filtered_issues['my_decay'] < 0]
+    # Filter out issues and coupons with negative decay
+    filtered_coupons = filtered_coupons[~filtered_coupons['issue_id'].isin(issues_with_negative_decay['id'])]
+    filtered_issues = filtered_issues[~filtered_issues['id'].isin(issues_with_negative_decay['id'])]
+    # Check if each 'amount' >= number of accepted coupons
+    assert np.all(filtered_issues['total_accepted'] <= filtered_issues['amount'])
 
     return filtered_coupons, filtered_issues
 
@@ -226,6 +257,7 @@ def make_events_timeline(filtered_coupons, filtered_issues):
         TrackTime("append")
         ids_in_event = [coupon_row['member_id'], coupon_row['id'], coupon_row['issue_id'], coupon_row['offer_id']]
 
+        # Add the coupon sent event
         event = [Event.coupon_sent, coupon_row['created_at']] + ids_in_event + [1]
         events_list.append(event)
 
@@ -272,6 +304,7 @@ def make_events_timeline(filtered_coupons, filtered_issues):
             datetimestamp = coupon_row['created_at'] + accepted_duration
 
         TrackTime("append")
+        # Add the member-response event
         event = [member_response, datetimestamp] + ids_in_event + [1]
         events_list.append(event)
 
@@ -363,13 +396,13 @@ def main():
 
     # plot_created_coupons(filtered_coupons)
 
-    # DATA CHECKS:
     filtered_coupons, filtered_issues = perform_data_checks(all_coupons, filtered_coupons, filtered_issues, filtered_offers)
-
-    # TODO: check of er nog coupons uitgegeven worden nadat iemand declined after accepting
-
-    # TODO: Check if each 'amount' >= number of accepted coupons
     # TODO: 'redeemed' 'after_expiring' what to do with it?
+
+    print("\nAfter data checks:")
+    print("nr coupons:", len(filtered_coupons))
+    print("nr issues:", len(filtered_issues))
+    print("nr offers:", len(filtered_offers))
 
     # sys.exit()
 
