@@ -21,7 +21,7 @@ from lib.tracktime import TrackTime, TrackReport
 
 pd.set_option('display.max_rows', 200)
 pd.set_option('display.max_columns', 100)
-pd.set_option('display.width', 120)
+pd.set_option('display.width', 150)
 
 def datetime_range(start_date, end_date, delta):
     result = []
@@ -117,59 +117,15 @@ class Event(enum.Enum):
     coupon_expired      = 4
 
 status_to_event = {('declined', None):              Event.member_declined,
-                   ('declined', 'after_accepting'): Event.member_accepted,
+                   ('declined', 'after_accepting'): Event.member_declined,
                    ('expired', 'after_accepting'):  Event.member_accepted,
                    ('expired', 'after_receiving'):  Event.member_let_expire,
                    ('expired', 'not_redeemed'):     Event.member_accepted,
                    ('redeemed', None):              Event.member_accepted,
                    ('redeemed', 'after_expiring'):  Event.member_accepted}
 
-def main():
-    global relevant_columns
-    conn = connect_db.establish_host_connection()
-    db   = connect_db.establish_database_connection(conn)
-    print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
 
-
-    """
-    Data prep:
-        - filter out lottery coupons, issues (NaN), and offers (if they have exclusively lottery coupons)
-        - filter out negative amount issues
-        - do not look at total_issued from issue table
-        - filter on certain horizon
-
-
-    Choose fixed horizon [T_start, T_end]
-    Filter out lottery coupons
-    Make timeline of events:
-       - coupon sent to member_i ['created_at']
-       - member accepted coupon [random('created_at',+=3)]
-       - member declined coupon [random('created_at',+=3)]
-       - coupon expired without member reacting (3 days)
-       - coupon expired without anyone accepting (trash bin)
-    Get list of involved members, and compute
-       - probability of letting a coupon expire
-       - Subscribed categories
-       - probability of accepting based on subscribed categories (coupon --> issue --> offer --> cat)
-    
-    """
-
-
-    query = "select * from coupon"
-    all_coupons = pd.read_sql_query(query, db)
-
-    query = "select * from offer"
-    all_offers = pd.read_sql_query(query, db)
-
-    query = "select * from issue"
-    all_issues = pd.read_sql_query(query, db)
-
-
-    print("\nBefore filtering:")
-    print("nr coupons:", len(all_coupons))
-    print("nr issues:", len(all_issues))
-    print("nr offers:", len(all_offers))
-
+def filter_coupons_issues_and_offers(all_coupons, all_issues, all_offers):
     non_lottery_coupons = all_coupons[all_coupons['type'] == 'Coupon']
 
     date_before = dt.datetime(2022, 12, 31)
@@ -197,16 +153,10 @@ def main():
     filtered_coupons = copy.copy(filtered_coupons)
     filtered_issues  = copy.copy(filtered_issues)
     filtered_offers  = copy.copy(filtered_offers)
-    
+    return filtered_coupons, filtered_issues, filtered_offers
 
-    print("\nAfter filtering:")
-    print("nr coupons:", len(filtered_coupons))
-    print("nr issues:", len(filtered_issues))
-    print("nr offers:", len(filtered_offers))
 
-    # plot_created_coupons(filtered_coupons)
-
-    # DATA CHECKS:
+def perform_data_checks(all_coupons, filtered_coupons, filtered_issues, filtered_offers):
     # Only offers of type standard and coupons of type Coupon
     assert np.all(filtered_offers['type'] == 'standard'), "Please filter out any offers of type Lottery"
     assert np.all(filtered_coupons['type'] == 'Coupon'), "Please filter out any coupons of type LotteryCoupon"
@@ -244,6 +194,10 @@ def main():
     filtered_issues.drop(['total_issued'], axis=1, inplace=True)
     filtered_issues = pd.merge(filtered_issues, coupon_counts, left_on='id', right_on='issue_id')
 
+    return filtered_coupons, filtered_issues
+
+
+def make_events_timeline(filtered_coupons, filtered_issues):
     # Calculate the times it took for members to decline a coupon.
     declined_coupons = filtered_coupons[np.logical_and(filtered_coupons['status'] == 'declined', filtered_coupons['sub_status'] != "after_accepting")]
     declined_durations = declined_coupons['status_updated_at'] - declined_coupons['created_at']
@@ -326,8 +280,6 @@ def main():
             # filtered_issues.loc[coupon_row['issue_id'],'nr_accepted_so_far'] += 1
             issue_info[coupon_row['issue_id']]['nr_accepted_so_far'] += 1
 
-        # TODO: check of er nog coupons uitgegeven worden nadat iemand declined after accepting
-        # TODO: check op 'amount' dmv events
         # check of event coupon_expired heeft plaatsgevonden
         TrackTime("check coupon expiry")
         if member_response != Event.member_accepted:
@@ -346,12 +298,83 @@ def main():
 
     print("\n")
     events_df = pd.DataFrame(events_list, columns=['event','at','member_id','coupon_id','issue_id','offer_id','coupon_count'])
+
+    # Sort events chronologically, and if two events have the same timestamp, sort on index as secondary constraint
     events_df['index'] = events_df.index
     events_df.sort_values(['at','index'], inplace=True)
     events_df.drop('index', axis=1, inplace=True)
+
     events_df = events_df.convert_dtypes()
+    return events_df
+
+
+def main():
+    global relevant_columns
+    conn = connect_db.establish_host_connection()
+    db   = connect_db.establish_database_connection(conn)
+    print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
+
+
+    """
+    Data prep:
+        - filter out lottery coupons, issues (NaN), and offers (if they have exclusively lottery coupons)
+        - filter out negative amount issues
+        - do not look at total_issued from issue table
+        - filter on certain horizon
+
+
+    Choose fixed horizon [T_start, T_end]
+    Filter out lottery coupons
+    Make timeline of events:
+       - coupon sent to member_i ['created_at']
+       - member accepted coupon [random('created_at',+=3)]
+       - member declined coupon [random('created_at',+=3)]
+       - coupon expired without member reacting (3 days)
+       - coupon expired without anyone accepting (trash bin)
+    Get list of involved members, and compute
+       - probability of letting a coupon expire
+       - Subscribed categories
+       - probability of accepting based on subscribed categories (coupon --> issue --> offer --> cat)
+    
+    """
+
+
+    query = "select * from coupon"
+    all_coupons = pd.read_sql_query(query, db)
+
+    query = "select * from offer"
+    all_offers = pd.read_sql_query(query, db)
+
+    query = "select * from issue"
+    all_issues = pd.read_sql_query(query, db)
+
+
+    print("\nBefore filtering:")
+    print("nr coupons:", len(all_coupons))
+    print("nr issues:", len(all_issues))
+    print("nr offers:", len(all_offers))
+
+    filtered_coupons, filtered_issues, filtered_offers = filter_coupons_issues_and_offers(all_coupons, all_issues, all_offers)
+
+    print("\nAfter filtering:")
+    print("nr coupons:", len(filtered_coupons))
+    print("nr issues:", len(filtered_issues))
+    print("nr offers:", len(filtered_offers))
+
+    # plot_created_coupons(filtered_coupons)
+
+    # DATA CHECKS:
+    filtered_coupons, filtered_issues = perform_data_checks(all_coupons, filtered_coupons, filtered_issues, filtered_offers)
+
+    # TODO: check of er nog coupons uitgegeven worden nadat iemand declined after accepting
+
+    # TODO: Check if each 'amount' >= number of accepted coupons
+    # TODO: 'redeemed' 'after_expiring' what to do with it?
+
+    # sys.exit()
+
+    events_df = make_events_timeline(filtered_coupons, filtered_issues)
     print(events_df)
-    print(events_df.dtypes)
 
     print("")
     total_decay  = np.sum(events_df['coupon_count'][events_df['event'] == Event.coupon_expired])
@@ -359,13 +382,24 @@ def main():
     print('Total number of coupons: %d'%total_amount)
     print('Total number of coupons never accepted: %d'%total_decay)
     print('Percentage of coupons never accepted: %.3f%%'%(total_decay/total_amount))
-    # sys.exit()
 
     print("")
     TrackReport()
-    sys.exit()
+
+    # print_table_info(db)
+
+    # result = db.execute(query)
+    # df = pd.DataFrame(result.fetchall())
+    # df = pd.read_sql_query(query, db)
+    # print(df)
+
+    # Close the connection to the database
+    db.close()
+    conn.close()
 
 
+
+def print_table_info(db):
     tables = ['coupon', 'issue', 'offer', 'member']
     # tables = pd.read_sql_query("show tables", db).squeeze().values
 
@@ -383,14 +417,6 @@ def main():
             else:
                 print("\t", col, type(res[0]), len(res), res[0])
 
-    # result = db.execute(query)
-    # df = pd.DataFrame(result.fetchall())
-    # df = pd.read_sql_query(query, db)
-    # print(df)
-
-    # Close the connection to the database
-    db.close()
-    conn.close()
 
 
 if __name__ == '__main__':
