@@ -109,20 +109,6 @@ relevant_columns = {'coupon': ['id', 'member_id', 'created_at', 'status',
                               'type', 'total_issued']
                     }
 
-class Event(enum.Enum):
-    member_declined     = 0
-    member_accepted     = 1
-    member_let_expire   = 2
-    coupon_sent         = 3
-    coupon_expired      = 4
-
-status_to_event = {('declined', None):              Event.member_declined,
-                   ('declined', 'after_accepting'): Event.member_declined,
-                   ('expired', 'after_accepting'):  Event.member_accepted,
-                   ('expired', 'after_receiving'):  Event.member_let_expire,
-                   ('expired', 'not_redeemed'):     Event.member_accepted,
-                   ('redeemed', None):              Event.member_accepted,
-                   ('redeemed', 'after_expiring'):  Event.member_accepted}
 
 
 def filter_coupons_issues_and_offers(all_coupons, all_issues, all_offers):
@@ -173,6 +159,21 @@ def filter_coupons_issues_and_offers(all_coupons, all_issues, all_offers):
     filtered_offers  = copy.copy(filtered_offers)
     return filtered_coupons, filtered_issues, filtered_offers
 
+
+class Event(enum.Enum):
+    member_declined     = 0
+    member_accepted     = 1
+    member_let_expire   = 2
+    coupon_sent         = 3
+    coupon_expired      = 4
+
+status_to_event = {('declined', None):              Event.member_declined,
+                   ('declined', 'after_accepting'): Event.member_declined,
+                   ('expired', 'after_accepting'):  Event.member_accepted,
+                   ('expired', 'after_receiving'):  Event.member_let_expire,
+                   ('expired', 'not_redeemed'):     Event.member_accepted,
+                   ('redeemed', None):              Event.member_accepted,
+                   ('redeemed', 'after_expiring'):  Event.member_accepted}
 
 def perform_data_checks(all_coupons, filtered_coupons, filtered_issues, filtered_offers):
     """ 
@@ -248,7 +249,23 @@ def perform_data_checks(all_coupons, filtered_coupons, filtered_issues, filtered
     return filtered_coupons, filtered_issues
 
 
+# class Event(enum.Enum):
+#     member_declined     = 0
+#     member_accepted     = 1
+#     member_let_expire   = 2
+#     coupon_sent         = 3
+#     coupon_expired      = 4
+
 def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
+    """
+    Make timeline of events:
+        1.  coupon sent to member_i
+        2a. member accepted coupon
+        2b. member declined coupon
+        2c. member let the offered coupon expire without reacting (usually after 3 days)
+        3.  coupon expired without anyone accepting (trash bin)
+    """
+
     # Calculate the times it took for members to decline a coupon.
     declined_coupons = filtered_coupons[np.logical_and(filtered_coupons['status'] == 'declined', filtered_coupons['sub_status'] != "after_accepting")]
     declined_durations = declined_coupons['status_updated_at'] - declined_coupons['created_at']
@@ -358,29 +375,19 @@ def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
     events_df['index'] = events_df.index
     events_df.sort_values(['at','index'], inplace=True)
     events_df.drop('index', axis=1, inplace=True)
+    events_df = events_df.reset_index(drop=True)
 
     events_df = events_df.convert_dtypes()
     return events_df
 
 
 def main():
-    global relevant_columns
     conn = connect_db.establish_host_connection()
     db   = connect_db.establish_database_connection(conn)
     print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
 
 
     """
-
-
-    Choose fixed horizon [T_start, T_end]
-    Filter out lottery coupons
-    Make timeline of events:
-       - coupon sent to member_i ['created_at']
-       - member accepted coupon [random('created_at',+=3)]
-       - member declined coupon [random('created_at',+=3)]
-       - coupon expired without member reacting (3 days)
-       - coupon expired without anyone accepting (trash bin)
     Get list of involved members, and compute
        - probability of letting a coupon expire
        - Subscribed categories
@@ -423,17 +430,27 @@ def main():
     print("nr issues:", len(filtered_issues))
     print("nr offers:", len(filtered_offers))
 
-    # sys.exit()
 
-    events_df = make_events_timeline(filtered_coupons, filtered_issues, filtered_offers)
-    print(events_df)
-
-    print("")
-    total_decay  = np.sum(events_df['coupon_count'][events_df['event'] == Event.coupon_expired])
-    total_amount = np.sum(filtered_issues['amount'])
-    print('Total number of coupons: %d'%total_amount)
-    print('Total number of coupons never accepted: %d'%total_decay)
-    print('Percentage of coupons never accepted: %.3f%%'%(total_decay/total_amount))
+    make_baseline_events_from_scratch = True
+    if make_baseline_events_from_scratch:
+        events_df = make_events_timeline(filtered_coupons, filtered_issues, filtered_offers)
+        TrackTime("print")
+        print(events_df)
+    
+        print("")
+        total_decay  = np.sum(events_df['coupon_count'][events_df['event'] == Event.coupon_expired])
+        total_amount = np.sum(filtered_issues['amount'])
+        print('Total number of coupons: %d'%total_amount)
+        print('Total number of coupons never accepted: %d'%total_decay)
+        print('Percentage of coupons never accepted: %.1f%%'%(total_decay/total_amount*100))
+    
+        TrackTime("to_csv")
+        events_df.to_csv('./baseline_events.csv', index=False)
+    else:
+        events_df = pd.read_csv('./baseline_events.csv', parse_dates=['at'])
+        events_df['event'] = events_df['event'].apply(lambda event: Event[str(event).replace('Event.','')])
+        events_df = events_df.convert_dtypes()
+        print(events_df)
 
     print("")
     TrackReport()
@@ -446,8 +463,11 @@ def main():
     # print(df)
 
     # Close the connection to the database
-    db.close()
-    conn.close()
+    try:
+        db.close()
+        conn.close()
+    except:
+        pass
 
 
 
