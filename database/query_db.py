@@ -126,6 +126,15 @@ status_to_event = {('declined', None):              Event.member_declined,
 
 
 def filter_coupons_issues_and_offers(all_coupons, all_issues, all_offers):
+    """ 
+    Data prep:
+        - filter out lottery coupons
+        - filter on certain horizon (1 jan 2021 - 31 dec 2022)
+        - filter out issues that have at least one coupon that got filtered out
+        - filter out coupons belonging to an issue that got filtered out
+        - filter out offers that do not have any filtered coupons belonging to them
+    """
+
     # Filter non-lottery coupons
     non_lottery_coupons = all_coupons[all_coupons['type'] == 'Coupon']
 
@@ -166,6 +175,17 @@ def filter_coupons_issues_and_offers(all_coupons, all_issues, all_offers):
 
 
 def perform_data_checks(all_coupons, filtered_coupons, filtered_issues, filtered_offers):
+    """ 
+    Data check:
+        - Check on coupon / offer type (no lottery coupons)
+        - Check whether *all* coupons belonging to the filtered_issues are present in the filtered_coupons table (i.e. no incomplete issues)
+        - Check if we do not have issues in the issue-table with an 'amount' of <= 0
+        - Check whether all combinations of status + sub_status from coupons can be translated into a member_reponse
+        - Update the 'total_issued' column from the issues table
+        - Make new column 'total_accepted' column in the issues table (based on member_response)
+        - Check whether for all issues we have 'total_accepted' <= 'total_issued'
+    """
+
     # Only offers of type standard and coupons of type Coupon
     assert np.all(filtered_offers['type'] == 'standard'), "Please filter out any offers of type Lottery"
     assert np.all(filtered_coupons['type'] == 'Coupon'), "Please filter out any coupons of type LotteryCoupon"
@@ -228,7 +248,7 @@ def perform_data_checks(all_coupons, filtered_coupons, filtered_issues, filtered
     return filtered_coupons, filtered_issues
 
 
-def make_events_timeline(filtered_coupons, filtered_issues):
+def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
     # Calculate the times it took for members to decline a coupon.
     declined_coupons = filtered_coupons[np.logical_and(filtered_coupons['status'] == 'declined', filtered_coupons['sub_status'] != "after_accepting")]
     declined_durations = declined_coupons['status_updated_at'] - declined_coupons['created_at']
@@ -242,11 +262,12 @@ def make_events_timeline(filtered_coupons, filtered_issues):
 
     # Set the index of the filtered_issues to the issue_id, for easy access during event-generation
     filtered_issues.index = filtered_issues['id']
+    filtered_offers.index = filtered_offers['id']
 
     # To measure how well the function 'determine_coupon_checked_expiry_time' calculates the actual 'status_updated_at' time after a member letting a coupon expire
     incorrectly_predicted_created_after_expiry = 0
     events_list = []
-    events_df = pd.DataFrame(columns=['event','at','member_id','coupon_id','issue_id','offer_id','coupon_count'])
+    events_df = pd.DataFrame(columns=['event','at','member_id','coupon_id','issue_id','offer_id','coupon_count', 'category_id'])
 
     for i, (index, coupon_row) in enumerate(filtered_coupons.iterrows()):
 
@@ -254,11 +275,12 @@ def make_events_timeline(filtered_coupons, filtered_issues):
         if i%1000 == 0:
             print("\rHandling coupon nr %d"%i,end='')
 
-        TrackTime("append")
+        TrackTime("ids_in_event")
         ids_in_event = [coupon_row['member_id'], coupon_row['id'], coupon_row['issue_id'], coupon_row['offer_id']]
 
+        TrackTime("append")
         # Add the coupon sent event
-        event = [Event.coupon_sent, coupon_row['created_at']] + ids_in_event + [1]
+        event = [Event.coupon_sent, coupon_row['created_at']] + ids_in_event + [1] + [filtered_offers.loc[coupon_row['offer_id'],'category_id']]
         events_list.append(event)
 
         TrackTime('check time')
@@ -275,17 +297,17 @@ def make_events_timeline(filtered_coupons, filtered_issues):
             # If a member let the coupon expire or declined the coupon, the status of the coupon
             # has not been updated since this action. Therefore, we know the exact time of the action
             datetimestamp = coupon_row['status_updated_at']
+
             TrackTime("Check expected timestamp")
             checked_expiries = determine_coupon_checked_expiry_time(coupon_row['created_at'], coupon_row['accept_time'])
             if checked_expiries is None:
                 checked_expiries = [datetimestamp]
 
-            predicted = False
+            predicted_correctly = False
             for checked_expiry in checked_expiries:
                 if abs(datetimestamp - checked_expiry) < dt.timedelta(minutes=10):
-                    predicted = True
-
-            if not predicted:
+                    predicted_correctly = True
+            if not predicted_correctly:
                 incorrectly_predicted_created_after_expiry += 1
                 # print("\nCoupon created at: %s, expired at: %s, status updated at:%s"%(coupon_row['created_at'], coupon_row['created_at'] + dt.timedelta(days=coupon_row['accept_time']), datetimestamp))
 
@@ -296,7 +318,6 @@ def make_events_timeline(filtered_coupons, filtered_issues):
             # If the member accepts the coupon, this tatus will eventually be updated by i.e. redeemed
             # Therefore, make a random guess as to when the member accepted.
             # Assume the time for accepting has the same distribution as the time for declining
-
             # TODO: filter declined_durations <= accept_time
             TrackTime("random datetimestamp")
             index = np.random.randint(len(declined_durations))
@@ -305,7 +326,7 @@ def make_events_timeline(filtered_coupons, filtered_issues):
 
         TrackTime("append")
         # Add the member-response event
-        event = [member_response, datetimestamp] + ids_in_event + [1]
+        event = [member_response, datetimestamp] + ids_in_event + [1] + [filtered_offers.loc[coupon_row['offer_id'],'category_id']]
         events_list.append(event)
 
         TrackTime("update issue_info")
@@ -317,20 +338,21 @@ def make_events_timeline(filtered_coupons, filtered_issues):
         TrackTime("check coupon expiry")
         if member_response != Event.member_accepted:
 
-            if issue_info[coupon_row['issue_id']]['nr_issued_so_far'] == filtered_issues.loc[coupon_row['issue_id'], 'total_issued']:
+            if issue_info[coupon_row['issue_id']]['nr_issued_so_far'] == filtered_issues.loc[coupon_row['issue_id'],'total_issued']:
 
                 # This coupon_row is the last row in which a coupon with this issue_id appears
                 decay_nr = filtered_issues.loc[coupon_row['issue_id'],'amount'] - issue_info[coupon_row['issue_id']]['nr_accepted_so_far']
 
                 if decay_nr > 0:
                     TrackTime("append")
-                    event = [Event.coupon_expired, filtered_issues.loc[coupon_row['issue_id'],'expires_at'], np.nan, np.nan, coupon_row['issue_id'], coupon_row['offer_id'], decay_nr]
+                    event = [Event.coupon_expired, filtered_issues.loc[coupon_row['issue_id'],'expires_at'], np.nan, np.nan, coupon_row['issue_id'], coupon_row['offer_id'], decay_nr, filtered_offers.loc[coupon_row['offer_id'],'category_id']]
                     events_list.append(event)
+
 
     print("\nincorrectly_predicted_created_after_expiry:", incorrectly_predicted_created_after_expiry)
 
     print("\n")
-    events_df = pd.DataFrame(events_list, columns=['event','at','member_id','coupon_id','issue_id','offer_id','coupon_count'])
+    events_df = pd.DataFrame(events_list, columns=['event','at','member_id','coupon_id','issue_id','offer_id','coupon_count', 'category_id'])
 
     # Sort events chronologically, and if two events have the same timestamp, sort on index as secondary constraint
     events_df['index'] = events_df.index
@@ -349,11 +371,6 @@ def main():
 
 
     """
-    Data prep:
-        - filter out lottery coupons, issues (NaN), and offers (if they have exclusively lottery coupons)
-        - filter out negative amount issues
-        - do not look at total_issued from issue table
-        - filter on certain horizon
 
 
     Choose fixed horizon [T_start, T_end]
@@ -371,7 +388,7 @@ def main():
     
     """
 
-
+    TrackTime("Retrieve from db")
     query = "select * from coupon"
     all_coupons = pd.read_sql_query(query, db)
 
@@ -387,6 +404,7 @@ def main():
     print("nr issues:", len(all_issues))
     print("nr offers:", len(all_offers))
 
+    TrackTime("Filtering")
     filtered_coupons, filtered_issues, filtered_offers = filter_coupons_issues_and_offers(all_coupons, all_issues, all_offers)
 
     print("\nAfter filtering:")
@@ -396,6 +414,7 @@ def main():
 
     # plot_created_coupons(filtered_coupons)
 
+    TrackTime("Data checks")
     filtered_coupons, filtered_issues = perform_data_checks(all_coupons, filtered_coupons, filtered_issues, filtered_offers)
     # TODO: 'redeemed' 'after_expiring' what to do with it?
 
@@ -406,7 +425,7 @@ def main():
 
     # sys.exit()
 
-    events_df = make_events_timeline(filtered_coupons, filtered_issues)
+    events_df = make_events_timeline(filtered_coupons, filtered_issues, filtered_offers)
     print(events_df)
 
     print("")
