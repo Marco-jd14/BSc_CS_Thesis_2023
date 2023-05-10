@@ -19,9 +19,11 @@ import matplotlib.pyplot as plt
 from dateutil.relativedelta import relativedelta
 from lib.tracktime import TrackTime, TrackReport
 
+
 pd.set_option('display.max_rows', 200)
 pd.set_option('display.max_columns', 100)
-pd.set_option('display.width', 150)
+pd.set_option('display.width', 130)
+
 
 def datetime_range(start_date, end_date, delta):
     result = []
@@ -110,7 +112,6 @@ relevant_columns = {'coupon': ['id', 'member_id', 'created_at', 'status',
                     }
 
 
-
 def filter_coupons_issues_and_offers(all_coupons, all_issues, all_offers):
     """ 
     Data prep:
@@ -169,14 +170,15 @@ class Event(enum.Enum):
 
 status_to_event = {('declined', None):              Event.member_declined,
                    ('declined', 'after_accepting'): Event.member_declined,
-                   ('expired', 'after_accepting'):  Event.member_accepted,
                    ('expired', 'after_receiving'):  Event.member_let_expire,
+                   ('expired', 'after_accepting'):  Event.member_accepted,
                    ('expired', 'not_redeemed'):     Event.member_accepted,
                    ('redeemed', None):              Event.member_accepted,
                    ('redeemed', 'after_expiring'):  Event.member_accepted}
 
+
 def perform_data_checks(all_coupons, filtered_coupons, filtered_issues, filtered_offers):
-    """ 
+    """
     Data check:
         - Check on coupon / offer type (no lottery coupons)
         - Check whether *all* coupons belonging to the filtered_issues are present in the filtered_coupons table (i.e. no incomplete issues)
@@ -223,7 +225,7 @@ def perform_data_checks(all_coupons, filtered_coupons, filtered_issues, filtered
     filtered_issues.drop(['total_issued'], axis=1, inplace=True)
     # Join the tables
     assert set(coupon_counts['issue_id']) == set(filtered_issues['id'])
-    filtered_issues = pd.merge(filtered_issues, coupon_counts, left_on='id', right_on='issue_id')
+    filtered_issues = pd.merge(filtered_issues, coupon_counts, left_on='id', right_on='issue_id').drop('issue_id',axis=1)
 
     # Make new column 'total_accepted' in the issue table
     accepted_coupons = filtered_coupons[filtered_coupons['member_response'] == Event.member_accepted]
@@ -235,7 +237,7 @@ def perform_data_checks(all_coupons, filtered_coupons, filtered_issues, filtered
     nr_accepted_coupons_per_issue = pd.concat([nr_accepted_coupons_per_issue, issues_with_zero_accepted_coupons])
     # Join the tables
     assert set(nr_accepted_coupons_per_issue['issue_id']) == set(filtered_issues['id'])
-    filtered_issues = pd.merge(filtered_issues, nr_accepted_coupons_per_issue, left_on='id', right_on='issue_id')
+    filtered_issues = pd.merge(filtered_issues, nr_accepted_coupons_per_issue, left_on='id', right_on='issue_id').drop('issue_id',axis=1)
 
     # Calculate issues with negative decay (which should be impossible)
     filtered_issues['my_decay'] = filtered_issues['amount'] - filtered_issues['total_accepted']
@@ -243,18 +245,192 @@ def perform_data_checks(all_coupons, filtered_coupons, filtered_issues, filtered
     # Filter out issues and coupons with negative decay
     filtered_coupons = filtered_coupons[~filtered_coupons['issue_id'].isin(issues_with_negative_decay['id'])]
     filtered_issues = filtered_issues[~filtered_issues['id'].isin(issues_with_negative_decay['id'])]
+    filtered_issues.drop('my_decay', axis=1, inplace=True)
     # Check if each 'amount' >= number of accepted coupons
     assert np.all(filtered_issues['total_accepted'] <= filtered_issues['amount'])
 
     return filtered_coupons, filtered_issues
 
 
-# class Event(enum.Enum):
-#     member_declined     = 0
-#     member_accepted     = 1
-#     member_let_expire   = 2
-#     coupon_sent         = 3
-#     coupon_expired      = 4
+class CouponLifeCycle(enum.Enum):
+    created   = 1
+    destroyed = -1
+
+
+def get_coupon_follow_id(events_df, row_idx, destroyed_stack, verbose=True):
+    if row_idx == 0:
+        # Make new follow id for first row
+        return 1
+
+    discarded = False
+    for k in range(len(destroyed_stack)):
+        destroyed_index = destroyed_stack.pop(0)
+
+        if not abs(events_df['at'].iloc[destroyed_index] - events_df['at'].iloc[row_idx]) <= dt.timedelta(seconds=60):
+            if verbose: print("Discarded coupon %d (follow%d) (was not a match for %d)\t"%(destroyed_index, events_df['coupon_follow_id'].iloc[destroyed_index], row_idx), str(abs(events_df['at'].iloc[destroyed_index] - events_df['at'].iloc[row_idx])))
+            discarded = True
+        else:
+            if discarded and verbose:
+                print("Follow id %d is a match for %d"%(events_df['coupon_follow_id'].iloc[destroyed_index], row_idx))
+            return events_df['coupon_follow_id'].iloc[destroyed_index]
+            
+    assert len(destroyed_stack) == 0
+    # Make new follow id
+    return np.max(events_df['coupon_follow_id'].iloc[:row_idx]) + 1
+
+
+def add_coupon_follow_ids_to_coupons_and_filter(filtered_coupons, filtered_issues, filtered_offers):
+    """ 
+    This function does the following:
+        - For every issue, try to match newly created coupons to expiry / declining times of other coupons
+        - Assign every coupon a coupon_follow_id, to be able to recreate the stream of how 1 particular
+            coupon is sent to multiple members and eventually (hopefully) accepted
+        - Keep track of the issue-ids for which this recreated stream of coupons leads to inconsistencies
+            in either of the following:
+                - 'amount' in the issue table
+                - Number of unique coupon_follow_ids
+                - Number of initially sent out / released coupons
+                - Number of active coupons at a time
+        - Update the issue table with that information
+        - Update the coupon table with the coupon_follow_ids
+
+    Then filter out those issues that were found to be inconsistent
+    """
+
+    issue_info = []
+    issues_to_filter_out = []
+    coupon_follow_ids = {}
+
+    for i, (index, issue_row) in enumerate(filtered_issues.iterrows()):
+        if i%100 == 0:
+            print("\rHandling issue nr %d"%i,end='')
+
+        TrackTime("get issue_coupons")
+        issue_coupons = filtered_coupons[filtered_coupons['issue_id'] == issue_row['id']]
+
+        TrackTime("Make events_df")
+        events = []
+        for j, (index, coupon_row) in enumerate(issue_coupons.iterrows()):
+            event = [CouponLifeCycle.created.name, CouponLifeCycle.created.value, coupon_row['id'], coupon_row['created_at'], coupon_row['status'], coupon_row['sub_status']]
+            events.append(event)
+
+            status, sub_status = coupon_row['status'], coupon_row['sub_status']
+            if status == 'declined' or (status == 'expired' and sub_status == 'after_receiving'):
+                event = [CouponLifeCycle.destroyed.name, CouponLifeCycle.destroyed.value, coupon_row['id'], coupon_row['status_updated_at'], coupon_row['status'], coupon_row['sub_status']]
+                events.append(event)
+
+        # Sort the events chronologically
+        events_df = pd.DataFrame(events, columns=['event','coupon_nr','coupon_id','at','status','sub_status'])
+        events_df['index'] = events_df.index
+        events_df.sort_values(['at','index'], inplace=True)
+        events_df.drop('index', axis=1, inplace=True)
+
+        # Assign coupon_follow_ids to coupon_id's
+        TrackTime("Determining coupon_follow_ids")
+        events_df['coupon_follow_id'] = -1
+        destroyed_stack = []
+        for j in range(len(events_df)):
+            if events_df['event'].iloc[j] == CouponLifeCycle.destroyed.name:
+                assert events_df['coupon_follow_id'].iloc[j] > 0
+                destroyed_stack.append(j)
+            else:
+                coupon_follow_id = get_coupon_follow_id(events_df, j, destroyed_stack, verbose=False)
+                indices_to_update = events_df.index[events_df['coupon_id'] == events_df['coupon_id'].iloc[j]]
+                events_df.loc[indices_to_update,'coupon_follow_id'] = coupon_follow_id
+
+        events_df['active_coupons'] = np.cumsum(events_df['coupon_nr'].values)
+
+        TrackTime("Updating coupon_follow_id dict")
+        coupon_to_follow_id = events_df[['coupon_id','coupon_follow_id']].groupby('coupon_id').head(1)
+        coupon_to_follow_id.index = coupon_to_follow_id['coupon_id'].values
+        coupon_to_follow_id.drop('coupon_id',axis=1, inplace=True)
+        coupon_follow_ids.update(coupon_to_follow_id.to_dict()['coupon_follow_id'])
+
+        TrackTime("Expectation checks")
+        equal = (issue_coupons['created_at'] - issue_row['sent_at']).abs() <= dt.timedelta(seconds=10)
+        max_nr_active_coupons = np.max(events_df['active_coupons'].values)
+        unique_coupon_follow_ids = np.max(events_df['coupon_follow_id'].values)
+        
+        # TODO: add info: nr_expired, nr_not_sent_on (before issue-expiry)
+        info = [np.sum(equal), max_nr_active_coupons]
+        issue_info.append(info)
+        
+        if np.sum(equal) != max_nr_active_coupons or max_nr_active_coupons != unique_coupon_follow_ids:
+
+            issues_to_filter_out.append(issue_row['id'])
+            print("\nInconsistent issue: %d     "%issue_row['id'], end='')
+            print(np.sum(equal), max_nr_active_coupons, unique_coupon_follow_ids)
+
+            offer_row = filtered_offers[filtered_offers['id'] == issue_row['offer_id']].squeeze()
+            offer_row = offer_row[['id','title','category_id','description','total_issued']]
+
+            issue_row['unique_coupon_follow_ids'] = unique_coupon_follow_ids
+            issue_row['max_nr_active_coupons'] = max_nr_active_coupons
+            issue_row['first_released'] = np.sum(equal)
+            issue_row = issue_row[['id','offer_id','total_issued','total_reissued','decay_count','sent_at','expires_at','aborted_at','amount','max_nr_active_coupons','unique_coupon_follow_ids','first_released']]
+
+            writer = pd.ExcelWriter('./issue_%d.xlsx'%i)
+            offer_row.to_excel(writer, 'offer')
+            issue_row.to_excel(writer, 'issue')
+            events_df.to_excel(writer, 'coupons')
+            writer.close()
+
+
+    TrackTime("Merging into filtered_coupons")
+    coupon_follow_ids = pd.DataFrame(coupon_follow_ids.items(), columns=['id','coupon_follow_id'])
+    assert set(coupon_follow_ids['id']) == set(filtered_coupons['id']), TrackReport()
+    filtered_coupons = pd.merge(filtered_coupons, coupon_follow_ids, on='id')
+
+    issue_info = pd.DataFrame(issue_info, columns=['first_released','max_nr_active_coupons'])
+    filtered_issues['first_released']        = issue_info['first_released']
+    filtered_issues['max_nr_active_coupons'] = issue_info['max_nr_active_coupons']
+
+    # Filtering out inconsistent issues
+    print("\nissues_to_filter_out:", issues_to_filter_out)
+    filtered_issues  = filtered_issues[~filtered_issues['id'].isin(issues_to_filter_out)]
+    filtered_coupons = filtered_coupons[filtered_coupons['issue_id'].isin(filtered_issues['id'])]
+    filtered_offers  = filtered_offers[filtered_offers['id'].isin(filtered_issues['offer_id'])]
+
+    return filtered_coupons, filtered_issues, filtered_offers
+
+
+def perform_data_checks_on_follow_coupon_ids(filtered_coupons, filtered_issues, filtered_offers):
+    # TODO: check if total_accepted + nr_expired + nr_not_sent_on == total_issued
+    # nr_unique_follow_coupon_ids == amount
+    # nr_active_coupons == amount
+    # first_released == amount
+
+    for i, (index, issue_row) in enumerate(filtered_issues.iterrows()):
+        pass
+
+    # # Check whether the first 'amount' coupons from an issue are all created at the same time as the issue was sent
+    # # coupon_counts = filtered_coupons[['issue_id']].groupby('issue_id').aggregate(total_issued=('issue_id','count')).reset_index()
+    # created_equals_sent = filtered_coupons[['created_at','issue_id']]
+    # created_equals_sent = pd.merge(created_equals_sent, filtered_issues[['id','sent_at']], left_on='issue_id', right_on='id').drop('id',axis=1)
+    # created_equals_sent['created_equals_sent'] = (created_equals_sent['created_at'] - created_equals_sent['sent_at']).abs() < dt.timedelta(seconds=10)
+    # print(created_equals_sent)
+    # issues = created_equals_sent.groupby('issue_id').aggregate(nr_created_equals_sent=('created_equals_sent','sum')).reset_index()
+    # issues = pd.merge(issues, filtered_issues[['id','amount']], left_on='issue_id', right_on='id').drop('id',axis=1)
+
+    # print(issues[issues['nr_created_equals_sent'] != issues['amount']])
+
+    # # assert np.all(issues['nr_created_equals_sent'] == issues['amount'])
+
+
+def save_df_to_sql(db, filtered_coupons, filtered_issues, filtered_offers):
+    TrackTime("Writing to db")
+
+    db.execute("DROP TABLE IF EXISTS `filtered_coupons`;")
+    db.execute("DROP TABLE IF EXISTS `filtered_issues`;")
+    db.execute("DROP TABLE IF EXISTS `filtered_offers`;")
+
+    # Translate Event objects to str for exporting to SQL
+    filtered_coupons['member_response'] = filtered_coupons['member_response'].apply(lambda event: str(event).replace('Event.',''))
+
+    filtered_coupons.to_sql("filtered_coupons", db)
+    filtered_issues.to_sql("filtered_issues", db)
+    filtered_offers.to_sql("filtered_offers", db)
+
 
 def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
     """
@@ -381,7 +557,12 @@ def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
     return events_df
 
 
+def filter_and_check_data(db):
+    pass
+
+
 def main():
+    TrackTime("Connect to db")
     conn = connect_db.establish_host_connection()
     db   = connect_db.establish_database_connection(conn)
     print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
@@ -430,8 +611,54 @@ def main():
     print("nr issues:", len(filtered_issues))
     print("nr offers:", len(filtered_offers))
 
+    print("\nInvestigating issues")
+    result = add_coupon_follow_ids_to_coupons_and_filter(filtered_coupons, filtered_issues, filtered_offers)
+    filtered_coupons, filtered_issues, filtered_offers = result
 
-    make_baseline_events_from_scratch = True
+    perform_data_checks_on_follow_coupon_ids(filtered_coupons, filtered_issues, filtered_offers)
+
+    print("\nAfter follow_coupon_id data checks:")
+    print("nr coupons:", len(filtered_coupons))
+    print("nr issues:", len(filtered_issues))
+    print("nr offers:", len(filtered_offers))
+
+    print("\nWriting to SQL...")
+    save_df_to_sql(db, filtered_coupons, filtered_issues, filtered_offers)
+
+    
+#     TrackTime("select from db")
+#     query = "select * from filtered_coupons"
+#     filtered_coupons = pd.read_sql_query(query, db)
+#     filtered_coupons['member_response'] = filtered_coupons['member_response'].apply(lambda event: Event[str(event)])
+
+#     query = "select * from filtered_issues"
+#     filtered_issues = pd.read_sql_query(query, db)
+
+#     query = "select * from filtered_offers"
+#     filtered_offers = pd.read_sql_query(query, db)
+
+    # issue_ids = [48881, 51855, 57783, 63969, 73944, 80472]
+    # filtered_issues = filtered_issues[filtered_issues['id'].isin(issue_ids)]
+    
+    # sys.exit()
+
+    # issues = filtered_issues[filtered_issues['amount'] > 2]
+    
+    # for issue_id in issues['id'].values:
+    #     print("\nIssue %d:"%issue_id)
+    #     query = "select * from issue where id=%d"%issue_id
+    #     issue_x = pd.read_sql_query(query, db)
+    #     print(issue_x[['id', 'offer_id', 'amount', 'total_issued', 'sent_at', 'expires_at', 'decay_count','aborted_at']])#, 'aborted_at']])
+    
+    #     print("\nAll coupons belonging to issue %d:"%issue_id)
+    #     query = "select * from coupon where issue_id=%d"%issue_id
+    #     coupons_from_issue_x = pd.read_sql_query(query, db)
+    #     coupons_from_issue_x = coupons_from_issue_x.iloc[:issue_x.squeeze()['amount'],:]
+    #     print(coupons_from_issue_x[['id','issue_id', 'offer_id', 'status', 'sub_status', 'created_at','status_updated_at']])
+    
+
+
+    make_baseline_events_from_scratch = False
     if make_baseline_events_from_scratch:
         events_df = make_events_timeline(filtered_coupons, filtered_issues, filtered_offers)
         TrackTime("print")
@@ -447,10 +674,11 @@ def main():
         TrackTime("to_csv")
         events_df.to_csv('./baseline_events.csv', index=False)
     else:
+        TrackTime("read_csv")
         events_df = pd.read_csv('./baseline_events.csv', parse_dates=['at'])
         events_df['event'] = events_df['event'].apply(lambda event: Event[str(event).replace('Event.','')])
         events_df = events_df.convert_dtypes()
-        print(events_df)
+        # print(events_df)
 
     print("")
     TrackReport()
@@ -463,11 +691,8 @@ def main():
     # print(df)
 
     # Close the connection to the database
-    try:
-        db.close()
-        conn.close()
-    except:
-        pass
+    db.close()
+    conn.close()
 
 
 
