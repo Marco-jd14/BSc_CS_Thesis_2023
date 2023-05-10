@@ -557,25 +557,7 @@ def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
     return events_df
 
 
-def filter_and_check_data(db):
-    pass
-
-
-def main():
-    TrackTime("Connect to db")
-    conn = connect_db.establish_host_connection()
-    db   = connect_db.establish_database_connection(conn)
-    print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
-
-
-    """
-    Get list of involved members, and compute
-       - probability of letting a coupon expire
-       - Subscribed categories
-       - probability of accepting based on subscribed categories (coupon --> issue --> offer --> cat)
-    
-    """
-
+def filter_and_check_data(db, save_to_SQL=False):
     TrackTime("Retrieve from db")
     query = "select * from coupon"
     all_coupons = pd.read_sql_query(query, db)
@@ -622,43 +604,45 @@ def main():
     print("nr issues:", len(filtered_issues))
     print("nr offers:", len(filtered_offers))
 
-    print("\nWriting to SQL...")
-    save_df_to_sql(db, filtered_coupons, filtered_issues, filtered_offers)
-
-    
-#     TrackTime("select from db")
-#     query = "select * from filtered_coupons"
-#     filtered_coupons = pd.read_sql_query(query, db)
-#     filtered_coupons['member_response'] = filtered_coupons['member_response'].apply(lambda event: Event[str(event)])
-
-#     query = "select * from filtered_issues"
-#     filtered_issues = pd.read_sql_query(query, db)
-
-#     query = "select * from filtered_offers"
-#     filtered_offers = pd.read_sql_query(query, db)
-
-    # issue_ids = [48881, 51855, 57783, 63969, 73944, 80472]
-    # filtered_issues = filtered_issues[filtered_issues['id'].isin(issue_ids)]
-    
-    # sys.exit()
-
-    # issues = filtered_issues[filtered_issues['amount'] > 2]
-    
-    # for issue_id in issues['id'].values:
-    #     print("\nIssue %d:"%issue_id)
-    #     query = "select * from issue where id=%d"%issue_id
-    #     issue_x = pd.read_sql_query(query, db)
-    #     print(issue_x[['id', 'offer_id', 'amount', 'total_issued', 'sent_at', 'expires_at', 'decay_count','aborted_at']])#, 'aborted_at']])
-    
-    #     print("\nAll coupons belonging to issue %d:"%issue_id)
-    #     query = "select * from coupon where issue_id=%d"%issue_id
-    #     coupons_from_issue_x = pd.read_sql_query(query, db)
-    #     coupons_from_issue_x = coupons_from_issue_x.iloc[:issue_x.squeeze()['amount'],:]
-    #     print(coupons_from_issue_x[['id','issue_id', 'offer_id', 'status', 'sub_status', 'created_at','status_updated_at']])
-    
+    if save_to_SQL:
+        print("\nWriting to SQL...")
+        save_df_to_sql(db, filtered_coupons, filtered_issues, filtered_offers)
 
 
+
+def main():
+    TrackTime("Connect to db")
+    conn = connect_db.establish_host_connection()
+    db   = connect_db.establish_database_connection(conn)
+    print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
+
+
+    filter_and_check_data_from_scratch = False
     make_baseline_events_from_scratch = False
+
+
+    if filter_and_check_data_from_scratch:
+        filter_and_check_data(db, save_to_SQL=False)
+    else:
+        TrackTime("select from db")
+        query = "select * from filtered_coupons"
+        filtered_coupons = pd.read_sql_query(query, db)
+        filtered_coupons['member_response'] = filtered_coupons['member_response'].apply(lambda event: Event[str(event)])
+
+        query = "select * from filtered_issues"
+        filtered_issues = pd.read_sql_query(query, db)
+
+        query = "select * from filtered_offers"
+        filtered_offers = pd.read_sql_query(query, db)
+
+    """ TODO:
+    Get list of involved members, and compute
+       - probability of letting a coupon expire
+       - Subscribed categories
+       - probability of accepting based on subscribed categories (coupon --> issue --> offer --> cat)
+    """
+
+
     if make_baseline_events_from_scratch:
         events_df = make_events_timeline(filtered_coupons, filtered_issues, filtered_offers)
         TrackTime("print")
