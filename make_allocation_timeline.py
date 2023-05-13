@@ -18,73 +18,12 @@ import matplotlib.pyplot as plt
 from dateutil.relativedelta import relativedelta
 from lib.tracktime import TrackTime, TrackReport
 
-import connect_db
-import query_db
+import database.connect_db as connect_db
+import database.query_db as query_db
 
 pd.set_option('display.max_rows', 200)
 pd.set_option('display.max_columns', 100)
 pd.set_option('display.width', 130)
-
-
-
-def determine_coupon_checked_expiry_time(created_at, accept_time):
-    """ Function that determines / predicts the time a coupon is sent
-    to the next member once it expires (i.e. the member has not replied)
-    """
-
-    # Check if timestamp is as expected
-    expired = created_at + dt.timedelta(days=accept_time)
-
-    # Before 14 dec 2021, whether coupons had expired was checked every morning at 10am
-    if expired.date() < dt.date(2021, 12, 14):
-        ten_am = dt.time(10, 0, 0)
-        if expired.time() <= ten_am:
-            checked_expiry = dt.datetime.combine(expired.date(), ten_am)
-        else:
-            # If the coupon expired after 10am, the coupons expiry was only noticed the next morning at 10am
-            checked_expiry = dt.datetime.combine(expired.date() + dt.timedelta(days=1), ten_am)
-
-        # 29 okt 2021 was a day with (presumable) IT issues: ignore data
-        if checked_expiry.date() == dt.date(2021, 10, 29):
-            return None
-
-        return [checked_expiry]
-        # checked_expiry2 = checked_expiry + dt.timedelta(days=1)
-        # return [checked_expiry, checked_expiry2]
-
-    # After 14 dec 2021, whether coupons had expired was checked every hour, except between 8pm and 8am at night
-    else:
-        eight_pm = dt.time(20, 0, 0)
-        eight_am = dt.time(8, 0, 0)
-        if expired.time() > eight_pm:
-            # If the coupon expired after 20:00, it is sent to the next person at 08:05 the next morning
-            checked_expiry = (expired + dt.timedelta(days=1)).replace(hour=8,minute=5)
-            return [checked_expiry]
-            # checked_expiry2 = expired if expired.time() < dt.time(20, 5, 0) else checked_expiry
-            # return [checked_expiry, checked_expiry2]
-
-        elif expired.time() < eight_am:
-            # If the coupon expired before 08:00, it is sent to the next person at 08:05 the same day
-            checked_expiry = expired.replace(hour=8,minute=5)
-            return [checked_expiry]
-
-        else:
-            # 28 sept 2022 was a day with (presumably) IT issues: ignore data
-            if expired.date() == dt.date(2022, 9, 28):
-                return None
-
-            # If a coupon expired, it is usually sent to the next member at the next 5th minute of the hour
-            checked_expiry = expired.replace(minute=5)
-            if expired.minute <= 5:
-                # When a coupon expired in the first 5 minutes of the hour, it is impossible to predict whether
-                # the coupon was sent to the next member in that same hour, or more than an hour later
-                # i.e. coupon expired at 15:03, it can both be sent to the next member at 15:05 or 16:05
-                checked_expiry2 = checked_expiry + dt.timedelta(hours=1)
-                return [checked_expiry, checked_expiry2]
-            else:
-                # If a coupon expired at 15:06, it is sent to the next member at 16:05
-                checked_expiry = checked_expiry + dt.timedelta(hours=1)
-                return [checked_expiry]
 
 
 
@@ -116,6 +55,58 @@ class Event(enum.Enum):
 #                    ('expired',  'not_redeemed'):     Event.member_accepted,
 #                    ('redeemed',  None):              Event.member_accepted,
 #                    ('redeemed', 'after_expiring'):   Event.member_accepted}
+
+
+def main():
+    TrackTime("Connect to db")
+    conn = connect_db.establish_host_connection()
+    db   = connect_db.establish_database_connection(conn)
+    print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
+
+    TrackTime("Retrieve from db")
+    result = query_db.retrieve_from_sql_db(db, 'filtered_coupons', 'filtered_issues', 'filtered_offers')
+    filtered_coupons, filtered_issues, filtered_offers = result
+
+
+    """ TODO:
+    Get list of involved members, and compute
+       - probability of letting a coupon expire
+       - Subscribed categories
+       - probability of accepting based on subscribed categories (coupon --> issue --> offer --> cat)
+    """
+
+
+    make_baseline_events_from_scratch  = True
+
+
+    if make_baseline_events_from_scratch:
+        events_df = make_events_timeline(filtered_coupons, filtered_issues, filtered_offers)
+        print(events_df)
+
+        print("")
+        total_decay  = np.sum(events_df['coupon_count'][events_df['event'] == Event.coupon_expired])
+        total_amount = np.sum(filtered_issues['amount'])
+        print('Total number of coupons: %d'%total_amount)
+        print('Total number of coupons never accepted: %d'%total_decay)
+        print('Percentage of coupons never accepted: %.1f%%'%(total_decay/total_amount*100))
+
+        TrackTime("to_csv")
+        events_df.to_csv('./baseline_events.csv', index=False)
+    else:
+        TrackTime("read_csv")
+        events_df = pd.read_csv('./baseline_events.csv', parse_dates=['at'])
+        events_df['event'] = events_df['event'].apply(lambda event: Event[str(event).replace('Event.','')])
+        events_df = events_df.convert_dtypes()
+        # print(events_df)
+
+    print("")
+    TrackReport()
+
+    # print_table_info(db)
+
+    # Close the connection to the database
+    db.close()
+    conn.close()
 
 
 def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
@@ -244,58 +235,65 @@ def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
 
 
 
-
-def main():
-    TrackTime("Connect to db")
-    conn = connect_db.establish_host_connection()
-    db   = connect_db.establish_database_connection(conn)
-    print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
-
-
-    make_baseline_events_from_scratch  = False
-
-
-    TrackTime("Retrieve from db")
-    result = query_db.retrieve_from_sql_db(db, 'filtered_coupons', 'filtered_issues', 'filtered_offers')
-    filtered_coupons, filtered_issues, filtered_offers = result
-
-
-    """ TODO:
-    Get list of involved members, and compute
-       - probability of letting a coupon expire
-       - Subscribed categories
-       - probability of accepting based on subscribed categories (coupon --> issue --> offer --> cat)
+def determine_coupon_checked_expiry_time(created_at, accept_time):
+    """ Function that determines / predicts the time a coupon is sent
+    to the next member once it expires (i.e. the member has not replied)
     """
 
+    # Check if timestamp is as expected
+    expired = created_at + dt.timedelta(days=accept_time)
 
-    if make_baseline_events_from_scratch:
-        events_df = make_events_timeline(filtered_coupons, filtered_issues, filtered_offers)
-        print(events_df)
+    # Before 14 dec 2021, whether coupons had expired was checked every morning at 10am
+    if expired.date() < dt.date(2021, 12, 14):
+        ten_am = dt.time(10, 0, 0)
+        if expired.time() <= ten_am:
+            checked_expiry = dt.datetime.combine(expired.date(), ten_am)
+        else:
+            # If the coupon expired after 10am, the coupons expiry was only noticed the next morning at 10am
+            checked_expiry = dt.datetime.combine(expired.date() + dt.timedelta(days=1), ten_am)
 
-        print("")
-        total_decay  = np.sum(events_df['coupon_count'][events_df['event'] == Event.coupon_expired])
-        total_amount = np.sum(filtered_issues['amount'])
-        print('Total number of coupons: %d'%total_amount)
-        print('Total number of coupons never accepted: %d'%total_decay)
-        print('Percentage of coupons never accepted: %.1f%%'%(total_decay/total_amount*100))
+        # 29 okt 2021 was a day with (presumable) IT issues: ignore data
+        if checked_expiry.date() == dt.date(2021, 10, 29):
+            return None
 
-        TrackTime("to_csv")
-        events_df.to_csv('./baseline_events.csv', index=False)
+        return [checked_expiry]
+        # checked_expiry2 = checked_expiry + dt.timedelta(days=1)
+        # return [checked_expiry, checked_expiry2]
+
+    # After 14 dec 2021, whether coupons had expired was checked every hour, except between 8pm and 8am at night
     else:
-        TrackTime("read_csv")
-        events_df = pd.read_csv('./baseline_events.csv', parse_dates=['at'])
-        events_df['event'] = events_df['event'].apply(lambda event: Event[str(event).replace('Event.','')])
-        events_df = events_df.convert_dtypes()
-        # print(events_df)
+        eight_pm = dt.time(20, 0, 0)
+        eight_am = dt.time(8, 0, 0)
+        if expired.time() > eight_pm:
+            # If the coupon expired after 20:00, it is sent to the next person at 08:05 the next morning
+            checked_expiry = (expired + dt.timedelta(days=1)).replace(hour=8,minute=5)
+            return [checked_expiry]
+            # checked_expiry2 = expired if expired.time() < dt.time(20, 5, 0) else checked_expiry
+            # return [checked_expiry, checked_expiry2]
 
-    print("")
-    TrackReport()
+        elif expired.time() < eight_am:
+            # If the coupon expired before 08:00, it is sent to the next person at 08:05 the same day
+            checked_expiry = expired.replace(hour=8,minute=5)
+            return [checked_expiry]
 
-    # print_table_info(db)
+        else:
+            # 28 sept 2022 was a day with (presumably) IT issues: ignore data
+            if expired.date() == dt.date(2022, 9, 28):
+                return None
 
-    # Close the connection to the database
-    db.close()
-    conn.close()
+            # If a coupon expired, it is usually sent to the next member at the next 5th minute of the hour
+            checked_expiry = expired.replace(minute=5)
+            if expired.minute <= 5:
+                # When a coupon expired in the first 5 minutes of the hour, it is impossible to predict whether
+                # the coupon was sent to the next member in that same hour, or more than an hour later
+                # i.e. coupon expired at 15:03, it can both be sent to the next member at 15:05 or 16:05
+                checked_expiry2 = checked_expiry + dt.timedelta(hours=1)
+                return [checked_expiry, checked_expiry2]
+            else:
+                # If a coupon expired at 15:06, it is sent to the next member at 16:05
+                checked_expiry = checked_expiry + dt.timedelta(hours=1)
+                return [checked_expiry]
+
 
 
 
