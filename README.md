@@ -16,4 +16,14 @@ Make sure you have the Python package `mysql` installed by running the command\
 `pip install mysql-connector-python`
 
 Then, to initiate the database using the commands from the .sql file, run the script `init_db_from_file.py` provided in the `database` folder from this repository.
-This should successfully create and fill a database from scratch, making it ready to be queried from other scripts.
+This should successfully create and fill a database from scratch, making it ready to be queried from other scripts (i.e. `query_db.py`)
+
+## Data prepping
+With the database initialized, it is not possible to have an easier look at the data and prepare it for usage.
+This is exactly what the script `filter_and_check_data.py` does in the `database` folder.
+It filters out irrelevant data, and then further cleans up the data by checking for inconsistencies.
+When the script is done, it writes the cleaned-up data back to the database, to new tables.
+The filtered data can then be easily retrieved from the database in other scripts.
+
+
+# Coupon Allocation Algorithms
