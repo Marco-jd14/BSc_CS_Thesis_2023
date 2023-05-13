@@ -16,6 +16,58 @@ import datetime as dt
 SQL_DB_PATH = "./quiet_2023-04-19.sql"
 
 
+def main():
+    overwrite_existing_database = False
+
+    # Establish connection to the database
+    conn = connect_db.establish_host_connection()
+    db   = connect_db.establish_database_connection(conn, overwrite=overwrite_existing_database)
+    print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
+
+    # Parse the SQL file, then execute the commands in it
+    execute_commands_from_sql_file(db)
+
+    # Close the connection to the database
+    db.close()
+    conn.close()
+
+
+def execute_commands_from_sql_file(db):
+    """ Function that applies commands from a local .sql file to a specified database 'db'
+    """
+
+    # Split the .sql file up into a list of commands
+    sql_commands = parse_sql_file()
+    print("Parsed %d commands from .sql file"%len(sql_commands))
+
+    # Split up the commands that are about CREATE TABLE, DROP TABLE, and the remaining commands
+    create_table_commands  = list(filter(lambda command: command.startswith("CREATE TABLE"), sql_commands))
+    drop_table_commands    = list(filter(lambda command: command.startswith("DROP TABLE"), sql_commands))
+    remaining_sql_commands = list(filter(lambda command: not (command.startswith("CREATE TABLE") or command.startswith("DROP TABLE")), sql_commands))
+
+    # First execute all DROP TABLE-commands
+    print("\nDropping existing tables")
+    start_time = dt.datetime.now()
+    execute_drop_table_commands(db, drop_table_commands)
+    print("\nSuccesfully dropped all existing tables, took %d.%d seconds"%((dt.datetime.now()-start_time).total_seconds(), (dt.datetime.now()-start_time).microseconds))
+
+    # Then execute all CREATE TABLE-commands
+    print("\nCreating new tables")
+    start_time = dt.datetime.now()
+    execution_order_of_table_creation_commands = execute_create_table_commands(db, create_table_commands)
+    print("\nSuccesfully created all the tables, took %d.%d seconds"%((dt.datetime.now()-start_time).total_seconds(), (dt.datetime.now()-start_time).microseconds))
+
+    # Order the remaining commands in the same order as in which the tables were created
+    execution_order_of_table_names = list(map(lambda c: c.split('(')[0].split()[2].strip('`'), execution_order_of_table_creation_commands))
+    ordered_remaining_sql_commands = order_remaining_commands_in_table_creation_order(execution_order_of_table_names, remaining_sql_commands)
+
+    # Execute the remaining commands
+    print("\nExecuting the remaining commands")
+    start_time = dt.datetime.now()
+    execute_commands(db, ordered_remaining_sql_commands)
+    print("\nSuccesfully executed all remaining commands, took %d.%d seconds"%((dt.datetime.now()-start_time).total_seconds(), (dt.datetime.now()-start_time).microseconds))
+
+
 def parse_sql_file():
     """ This function opens a file specified in the global constant SQL_DB_PATH,
     then removes some comments for clarity, and returns the list of commands present in the file"""
@@ -170,56 +222,6 @@ def execute_commands(db, commands):
             sys.exit(0)
 
 
-def execute_commands_from_sql_file(db):
-    """ Function that applies commands from a local .sql file to a specified database 'db'
-    """
-
-    # Split the .sql file up into a list of commands
-    sql_commands = parse_sql_file()
-    print("Parsed %d commands from .sql file"%len(sql_commands))
-
-    # Split up the commands that are about CREATE TABLE, DROP TABLE, and the remaining commands
-    create_table_commands  = list(filter(lambda command: command.startswith("CREATE TABLE"), sql_commands))
-    drop_table_commands    = list(filter(lambda command: command.startswith("DROP TABLE"), sql_commands))
-    remaining_sql_commands = list(filter(lambda command: not (command.startswith("CREATE TABLE") or command.startswith("DROP TABLE")), sql_commands))
-
-    # First execute all DROP TABLE-commands
-    print("\nDropping existing tables")
-    start_time = dt.datetime.now()
-    execute_drop_table_commands(db, drop_table_commands)
-    print("\nSuccesfully dropped all existing tables, took %d.%d seconds"%((dt.datetime.now()-start_time).total_seconds(), (dt.datetime.now()-start_time).microseconds))
-
-    # Then execute all CREATE TABLE-commands
-    print("\nCreating new tables")
-    start_time = dt.datetime.now()
-    execution_order_of_table_creation_commands = execute_create_table_commands(db, create_table_commands)
-    print("\nSuccesfully created all the tables, took %d.%d seconds"%((dt.datetime.now()-start_time).total_seconds(), (dt.datetime.now()-start_time).microseconds))
-
-    # Order the remaining commands in the same order as in which the tables were created
-    execution_order_of_table_names = list(map(lambda c: c.split('(')[0].split()[2].strip('`'), execution_order_of_table_creation_commands))
-    ordered_remaining_sql_commands = order_remaining_commands_in_table_creation_order(execution_order_of_table_names, remaining_sql_commands)
-
-    # Execute the remaining commands
-    print("\nExecuting the remaining commands")
-    start_time = dt.datetime.now()
-    execute_commands(db, ordered_remaining_sql_commands)
-    print("\nSuccesfully executed all remaining commands, took %d.%d seconds"%((dt.datetime.now()-start_time).total_seconds(), (dt.datetime.now()-start_time).microseconds))
-
-
-def main():
-    overwrite_existing_database = False
-
-    # Establish connection to the database
-    conn = connect_db.establish_host_connection()
-    db   = connect_db.establish_database_connection(conn, overwrite=overwrite_existing_database)
-    print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
-
-    # Parse the SQL file, then execute the commands in it
-    execute_commands_from_sql_file(db)
-
-    # Close the connection to the database
-    db.close()
-    conn.close()
 
 if __name__ == '__main__':
     main()

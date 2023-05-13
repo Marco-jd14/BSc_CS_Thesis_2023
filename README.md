@@ -15,8 +15,11 @@ Once you have verified a working version of MySQL on your system, it is now poss
 Make sure you have the Python package `mysql` installed by running the command\
 `pip install mysql-connector-python`
 
-Then, to initiate the database using the commands from the .sql file, run the script `init_db_from_file.py` provided in the `database` folder from this repository.
-This should successfully create and fill a database from scratch, making it ready to be queried from other scripts (i.e. `query_db.py`)
+Then, to initiate the database using the commands from the .sql file, open the script `init_db_from_file.py` provided in the `database` folder from this repository.
+Before running the script, first make sure to update the HOST_ARGS and possibly DATABASE_NAME, which can be found at the top of the script.
+If you want to change your password before writing it in the script, you can open the MySQL Command Line Client and enter your original password.
+Then, you can run the command `ALTER USER 'root'@'localhost' IDENTIFIED BY 'my_new_password'`.
+After making sure the HOST_ARGS are correct, the script should successfully create and fill a database from scratch, making it ready to be queried from other scripts (i.e. `query_db.py`)
 
 ## Data prepping
 With the database initialized, it is not possible to have an easier look at the data and prepare it for usage.
