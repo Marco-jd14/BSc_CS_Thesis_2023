@@ -512,21 +512,6 @@ def filter_out_inconsistent_issues(filtered_coupons, filtered_issues, filtered_o
     return filtered_coupons, filtered_issues, filtered_offers
 
 
-def save_df_to_sql(db, filtered_coupons, filtered_issues, filtered_offers):
-    TrackTime("Writing to db")
-
-    db.execute("DROP TABLE IF EXISTS `filtered_coupons`;")
-    db.execute("DROP TABLE IF EXISTS `filtered_issues`;")
-    db.execute("DROP TABLE IF EXISTS `filtered_offers`;")
-
-    # Translate Event objects to str for exporting to SQL
-    filtered_coupons['member_response'] = filtered_coupons['member_response'].apply(lambda event: str(event).replace('Event.',''))
-
-    filtered_coupons.to_sql("filtered_coupons", db)
-    filtered_issues.to_sql("filtered_issues", db)
-    filtered_offers.to_sql("filtered_offers", db)
-
-
 def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
     """
     Make timeline of events:
@@ -652,16 +637,11 @@ def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
     return events_df
 
 
-def filter_and_check_data(db, save_to_SQL=False):
+def filter_and_check_data(db, save_to_SQL_DB=False):
+    # Retrieve tables from SQL db
     TrackTime("Retrieve from db")
-    query = "select * from coupon"
-    all_coupons = pd.read_sql_query(query, db)
-
-    query = "select * from offer"
-    all_offers = pd.read_sql_query(query, db)
-
-    query = "select * from issue"
-    all_issues = pd.read_sql_query(query, db)
+    result = retrieve_from_sql_db(db, 'coupon', 'issue', 'offer')
+    all_coupons, all_issues, all_offers = result
 
     print("\nBefore filtering:")
     print("nr coupons:", len(all_coupons))
@@ -700,11 +680,12 @@ def filter_and_check_data(db, save_to_SQL=False):
     print("nr issues:", len(filtered_issues))
     print("nr offers:", len(filtered_offers))
 
-    # plot_created_coupons(filtered_coupons)
+    plot_created_coupons(filtered_coupons)
 
-    if save_to_SQL:
-        print("\nWriting to SQL...")
-        save_df_to_sql(db, filtered_coupons, filtered_issues, filtered_offers)
+    if save_to_SQL_DB:
+        TrackTime("Writing to db")
+        name_to_table_mapping = {'filtered_coupons':filtered_coupons, 'filtered_issues':filtered_issues, 'filtered_offers':filtered_offers}
+        save_df_to_sql(db, name_to_table_mapping)
 
 
 
@@ -715,23 +696,16 @@ def main():
     print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
 
 
-    filter_and_check_data_from_scratch = True
+    filter_and_check_data_from_scratch = False
     make_baseline_events_from_scratch  = False
 
 
     if filter_and_check_data_from_scratch:
-        filter_and_check_data(db, save_to_SQL=True)
+        filter_and_check_data(db, save_to_SQL_DB=False)
 
     TrackTime("Retrieve from db")
-    query = "select * from filtered_coupons"
-    filtered_coupons = pd.read_sql_query(query, db)
-    filtered_coupons['member_response'] = filtered_coupons['member_response'].apply(lambda event: Event[str(event)])
-
-    query = "select * from filtered_issues"
-    filtered_issues = pd.read_sql_query(query, db)
-
-    query = "select * from filtered_offers"
-    filtered_offers = pd.read_sql_query(query, db)
+    result = retrieve_from_sql_db(db, 'filtered_coupons', 'filtered_issues', 'filtered_offers')
+    filtered_coupons, filtered_issues, filtered_offers = result
 
 
     """ TODO:
@@ -767,11 +741,6 @@ def main():
 
     # print_table_info(db)
 
-    # result = db.execute(query)
-    # df = pd.DataFrame(result.fetchall())
-    # df = pd.read_sql_query(query, db)
-    # print(df)
-
     # Close the connection to the database
     db.close()
     conn.close()
@@ -780,20 +749,19 @@ def main():
 
 def print_table_info(db):
     tables = ['filtered_coupons', 'filtered_issues', 'offer', 'member']
-    # tables = pd.read_sql_query("show tables", db).squeeze().values
+    # all_tables = pd.read_sql_query("show tables", db).squeeze().values
 
     for table_name in tables:
         print("\n\nTABLE", table_name)
         query = "SELECT * FROM %s"%table_name
-        result = db.execute(query)
-        df = pd.DataFrame(result.fetchall())
+        df = pd.read_sql_query(query, db)
 
         for col in df.columns:
-            res = pd.unique(df[col].values)
-            if len(res) < 10:
-                print("\t", col, type(res[0]), len(res), res, res[0])
+            unique_values = pd.unique(df[col].values)
+            if len(unique_values) < 10:
+                print("\t", col, type(unique_values[0]), len(unique_values), unique_values, unique_values[0])
             else:
-                print("\t", col, type(res[0]), len(res), res[0])
+                print("\t", col, type(unique_values[0]), len(unique_values), unique_values[0])
 
 
 

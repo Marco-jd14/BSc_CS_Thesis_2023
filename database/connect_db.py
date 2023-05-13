@@ -80,7 +80,9 @@ def establish_database_connection(connection, overwrite=False):
     return db
 
 
+# Example usage:
 if __name__ == '__main__':
+    # How to establish a connection to the database
     conn = establish_host_connection()
     db   = establish_database_connection(conn, overwrite=False)
     print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
@@ -90,5 +92,11 @@ if __name__ == '__main__':
     df = pd.DataFrame(result.fetchall())
     print(df)
 
+    # The following is equivalent
+    query = "show tables;"
+    df = pd.read_sql_query(query, db)
+    print(df)
+
+    # Close connection to the database when you're done with it
     db.close()
     conn.close()
