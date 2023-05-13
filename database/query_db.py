@@ -4,7 +4,17 @@ Created on Sat May 13 11:25:27 2023
 
 @author: Marco
 """
+import enum
 import pandas as pd
+
+
+# Relevant events according to the coupon lifecycle
+class Event(enum.Enum):
+    member_declined     = 0
+    member_accepted     = 1
+    member_let_expire   = 2 # i.e. after 3 days
+    coupon_sent         = 3
+    coupon_expired      = 4 # i.e. after 1 month
 
 
 def retrieve_from_sql_db(db, *table_names):
@@ -14,7 +24,7 @@ def retrieve_from_sql_db(db, *table_names):
     tables = []
 
     for table_name in table_names:
-        print("Retrieving '%s' from database"%table_name)
+        print("Retrieving table '%s' from database"%table_name)
 
         query = "select * from %s"%table_name
         table = pd.read_sql_query(query, db)
@@ -33,14 +43,14 @@ def save_df_to_sql(db, name_to_table_mapping):
     The dictionary is a mapping from table-name (to save the table under) to dataframe
     """
     for table_name, table in name_to_table_mapping.items():
-        print("Writing '%s' to database"%table_name)
+        print("Writing table '%s' to database"%table_name)
 
         # Translate Event objects to str for exporting to SQL
         if 'member_response' in table.columns:
            table['member_response'] = table['member_response'].apply(lambda event: str(event).replace('Event.',''))
 
         db.execute("DROP TABLE IF EXISTS `%s`;"%table_name)
-        table.to_sql(table_name, db)
+        table.to_sql(table_name, db, index=False)
 
 
 
