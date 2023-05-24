@@ -9,12 +9,10 @@ Created on Thu May 18 18:19:02 2023
 import sys
 import copy
 import enum
-import timeit
 import numpy as np
 import pandas as pd
 import datetime as dt
 from pprint import pprint
-from collections import Counter
 import matplotlib.pyplot as plt
 from dateutil.relativedelta import relativedelta
 from database.lib.tracktime import TrackTime, TrackReport
@@ -38,19 +36,17 @@ def main():
     # print_table_info(db)
 
 
-    # coupon = filtered_coupons.iloc[1000,:]
-    # matching_context = filtered_offers[filtered_offers['id'] == coupon['offer_id']].squeeze()
-    # timestamp = coupon['created_at']
-    # matching_context = get_matching_context()
-    # matching_context = matching_context.squeeze()
-    # print(matching_context)
-
     query = "select * from member_category"
     all_member_categories = pd.read_sql_query(query, db)
     query = "select * from member_family_member where type='child'"
     all_children = pd.read_sql_query(query, db)
 
-    eligible_members_basic = get_eligible_members_basic(   db, verbose=False)
+    eligible_members_basic = get_eligible_members_basic(db, verbose=False)
+
+    # query = "select * from member"
+    # all_members = pd.read_sql_query(query, db)
+    # plot_timeline_active_coupons(all_members,'onboarded_at')
+    # plot_timeline_active_coupons(all_members,'receive_coupon_after')
 
     print("Nr coupons to handle:",len(filtered_coupons))
 
@@ -73,33 +69,44 @@ def main():
         # print("nr eligible_members:", len(eligible_members))
         # TODO: eligibility based on coupon history
 
-        # if i > 10000:
-        #     break
+        if i > 0:
+            break
 
     db.close()
 
     TrackReport()
 
 
-def get_matching_context():
-    matching_context = pd.DataFrame([[]])
-    matching_context['category_id']                                 = 30
-    matching_context['member_criteria_gender']                      = 'female'
-    matching_context['family_criteria_is_single']                   = 1
+def plot_timeline_active_coupons(df, col_name):
+    timestamps = df[col_name]
+    timestamps = timestamps.sort_values(ascending=True)
+    assert timestamps.is_monotonic
 
-    matching_context['member_criteria_min_age']                     = 40
-    matching_context['member_criteria_max_age']                     = 50
+    start_date = timestamps.iloc[0] - dt.timedelta(seconds=1)
+    end_date   = timestamps.iloc[-1] + dt.timedelta(seconds=1)
+    delta = {'days':1}
+    intervals = datetime_range(start_date, end_date, delta)
 
-    matching_context['family_criteria_min_count']                   = 0
-    matching_context['family_criteria_max_count']                   = 5
-    matching_context['family_criteria_has_children']                = 1
+    res = timestamps.groupby(pd.cut(timestamps, intervals)).count()
+    res.name = "nr_coupons_per_interval"
+    print(res)
+    res = res.reset_index()
 
-    matching_context['family_criteria_child_age_range_min']         = 5
-    matching_context['family_criteria_child_age_range_max']         = 18
-    matching_context['family_criteria_child_stages_child_stages']   = '["schoolkind","kleuter"]'
-    matching_context['family_criteria_child_gender']                = 'male'
+    interval_ends = list(map(lambda interval: interval.right, res[col_name]))
+    plt.plot(interval_ends, res.nr_coupons_per_interval, '-o')
+    plt.xticks(fontsize=8)
 
-    return matching_context
+def datetime_range(start_date, end_date, delta):
+    result = []
+    nxt = start_date
+    delta = relativedelta(**delta)
+
+    while nxt <= end_date:
+        result.append(nxt)
+        nxt += delta
+
+    result.append(end_date)
+    return result
 
 
 def child_age_to_stage(age):
@@ -124,6 +131,7 @@ def calculate_age_at(date_born, date_at):
 
 
 def get_eligible_members_time_dependent(db, eligible_members, matching_context, timestamp, all_children=None, verbose=False):
+    # TODO: inactivated_at, active, onboarded_at, receive_coupons_after, 'created_at'
 
     TrackTime("calc age")
     # Calculate age of members

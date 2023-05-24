@@ -17,20 +17,12 @@ from lib.tracktime import TrackTime, TrackReport
 
 import connect_db
 import query_db
+Event = query_db.Event
 
 # For printing dataframes
 pd.set_option('display.max_rows', 200)
 pd.set_option('display.max_columns', 100)
 pd.set_option('display.width', 120)
-
-
-# Relevant events according to the coupon lifecycle
-class Event(enum.Enum):
-    member_declined     = 0
-    member_accepted     = 1
-    member_let_expire   = 2 # i.e. after 3 days
-    coupon_sent         = 3
-    coupon_expired      = 4 # i.e. after 1 month
 
 
 # All the possible combinations of status + sub_status found in the data
@@ -55,7 +47,7 @@ def main():
 
     if filter_and_check_data_from_scratch:
         # Also choose whether or not to save the result to the database ornot
-        filter_and_check_data(db, save_to_SQL_DB=True)
+        filter_and_check_data(db, save_to_SQL_DB=False)
 
     TrackTime("Retrieve from db")
     result = query_db.retrieve_from_sql_db(db, 'filtered_coupons', 'filtered_issues', 'filtered_offers')
@@ -362,6 +354,9 @@ def add_coupon_follow_ids_to_coupons(filtered_coupons, filtered_issues, filtered
         issue_info.append(info)
 
         if nr_coupons_sent_out_at_first != max_nr_active_coupons or max_nr_active_coupons != nr_unique_coupon_follow_ids:
+            continue
+        
+        if nr_unique_coupon_follow_ids != issue_row['amount']:
             # Print some information to the terminal as to why the issue is found to be inconsistent
             issues_to_filter_out.append(issue_row['id'])
             if verbose:
@@ -370,8 +365,9 @@ def add_coupon_follow_ids_to_coupons(filtered_coupons, filtered_issues, filtered
                 print("\t%30s"%"max_nr_active_coupons:", max_nr_active_coupons)
                 print("\t%30s"%"nr_unique_coupon_follow_ids:", nr_unique_coupon_follow_ids)
                 print("\t%30s"%"amount:", issue_row['amount'])
+                print("\t%30s"%"decay:", issue_row['decay_count'])
 
-            if export_inconsistent_issues:
+            if True:#export_inconsistent_issues:
                 # Make interesting offer information to export
                 offer_row = filtered_offers[filtered_offers['id'] == issue_row['offer_id']].squeeze()
                 offer_row = offer_row[['id','title','category_id','description','total_issued']]
@@ -491,13 +487,17 @@ def filter_out_inconsistent_issues(filtered_coupons, filtered_issues, filtered_o
                (issue_group['status_updated_at'] < (issue_group['expires_at'] - issue_group['accept_time'].apply(lambda el: dt.timedelta(days=el))) )
 
     # Apply the above functions to each issue-id
-    TrackTime("Calculating nr_not_sent_on")
-    print("\nComputing whether coupons were eventually accepted")
-    nr_accepted     = last_followed_coupons.groupby('issue_id').apply(lambda issue_group: was_coupon_accepted(issue_group).sum()).reset_index(name='nr_accepted')
-    nr_expired      = last_followed_coupons.groupby('issue_id').apply(lambda issue_group: was_coupon_expired(issue_group).sum()).reset_index(name='nr_expired')
-    nr_not_sent_on  = last_followed_coupons.groupby('issue_id').apply(lambda issue_group: was_coupon_not_sent_on(issue_group).sum()).reset_index(name='nr_not_sent_on')
+    last_followed_coupons['accepted']    = was_coupon_accepted(last_followed_coupons)
+    last_followed_coupons['expired']     = was_coupon_expired(last_followed_coupons)
+    last_followed_coupons['not_sent_on'] = was_coupon_not_sent_on(last_followed_coupons)
 
-    TrackTime("Other")
+    nr_accepted    = last_followed_coupons.groupby('issue_id').aggregate(nr_accepted=('accepted','sum')).reset_index()
+    nr_expired     = last_followed_coupons.groupby('issue_id').aggregate(nr_expired=('expired','sum')).reset_index()
+    nr_not_sent_on = last_followed_coupons.groupby('issue_id').aggregate(nr_not_sent_on=('not_sent_on','sum')).reset_index()
+    # nr_accepted     = last_followed_coupons.groupby('issue_id').apply(lambda issue_group: was_coupon_accepted(issue_group).sum()).reset_index(name='nr_accepted')
+    # nr_expired      = last_followed_coupons.groupby('issue_id').apply(lambda issue_group: was_coupon_expired(issue_group).sum()).reset_index(name='nr_expired')
+    # nr_not_sent_on  = last_followed_coupons.groupby('issue_id').apply(lambda issue_group: was_coupon_not_sent_on(issue_group).sum()).reset_index(name='nr_not_sent_on')
+
     # Merge the info about nr_accepted, nr_expired, and nr_not_sent_on into the issues table
     last_coupons_status = pd.merge(pd.merge(nr_accepted, nr_expired, on='issue_id'), nr_not_sent_on, on='issue_id') 
     filtered_issues = pd.merge(filtered_issues, last_coupons_status, left_on='id', right_on='issue_id').drop('issue_id',axis=1)

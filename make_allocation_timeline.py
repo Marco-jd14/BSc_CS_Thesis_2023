@@ -16,10 +16,11 @@ from pprint import pprint
 from collections import Counter
 import matplotlib.pyplot as plt
 from dateutil.relativedelta import relativedelta
-from lib.tracktime import TrackTime, TrackReport
+from database.lib.tracktime import TrackTime, TrackReport
 
 import database.connect_db as connect_db
 import database.query_db as query_db
+Event = query_db.Event
 
 pd.set_option('display.max_rows', 200)
 pd.set_option('display.max_columns', 100)
@@ -38,14 +39,6 @@ relevant_columns = {'coupon': ['id', 'member_id', 'created_at', 'status',
                               'type', 'total_issued']
                     }
 
-
-# Relevant events according to the coupon lifecycle
-class Event(enum.Enum):
-    member_declined     = 0
-    member_accepted     = 1
-    member_let_expire   = 2 # i.e. after 3 days
-    coupon_sent         = 3
-    coupon_expired      = 4 # i.e. after 1 month
 
 # # All the possible combinations of status + sub_status found in the data
 # status_to_event = {('declined',  None):              Event.member_declined,
