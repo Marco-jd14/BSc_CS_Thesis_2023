@@ -40,6 +40,8 @@ def main():
     all_member_categories = pd.read_sql_query(query, db)
     query = "select * from member_family_member where type='child'"
     all_children = pd.read_sql_query(query, db)
+    query = "select * from member_family_member where type='partner'"
+    all_partners = pd.read_sql_query(query, db)
 
     eligible_members_basic = get_eligible_members_basic(db, verbose=False)
 
@@ -61,8 +63,8 @@ def main():
         timestamp = coupon['created_at']
 
         eligible_members = eligible_members_basic
-        eligible_members = get_eligible_members_static(        db, eligible_members, matching_context, all_member_categories, verbose=False)
-        eligible_members = get_eligible_members_time_dependent(db, eligible_members, matching_context, timestamp, all_children, verbose=False)
+        eligible_members = get_eligible_members_static(        eligible_members, matching_context, all_partners, all_member_categories, verbose=False)
+        eligible_members = get_eligible_members_time_dependent(eligible_members, matching_context, all_partners, all_children, timestamp, verbose=False)
         # TrackTime('copy')
         # eligible_members = copy.copy(eligible_members)
         # print(eligible_members.shape)
@@ -130,17 +132,17 @@ def calculate_age_at(date_born, date_at):
     return date_at.year - date_born.year - ((date_at.month, date_at.day) < (date_born.month, date_born.day))
 
 
-def get_eligible_members_time_dependent(db, eligible_members, matching_context, timestamp, all_children=None, verbose=False):
+def get_eligible_members_time_dependent(eligible_members, matching_context, all_partners, all_children, timestamp, verbose=False, tracktime=False):
     # TODO: inactivated_at, active, onboarded_at, receive_coupons_after, 'created_at'
 
-    TrackTime("calc age")
+    if tracktime: TrackTime("calc age")
     # Calculate age of members
     min_age = matching_context['member_criteria_min_age']
     max_age = matching_context['member_criteria_max_age']
     if not pd.isna(min_age) or not pd.isna(max_age):
         members_age = eligible_members['date_of_birth'].apply(lambda born: calculate_age_at(born, timestamp.date()))
 
-    TrackTime("age criteria")
+    if tracktime: TrackTime("age criteria")
     # Minimum and maximum age criteria
     if not pd.isna(min_age) and not pd.isna(max_age):
         age_in_range = np.logical_and((members_age >= min_age).values, (members_age <= max_age).values)
@@ -151,7 +153,7 @@ def get_eligible_members_time_dependent(db, eligible_members, matching_context, 
         eligible_members = eligible_members[(members_age <= max_age).values]
     if verbose: print("nr eligible_members age range:", len(eligible_members))
 
-    TrackTime("setting up family criteria")
+    if tracktime: TrackTime("setting up family criteria")
     # Family criteria
     fam_min_count       = matching_context['family_criteria_min_count']
     fam_max_count       = matching_context['family_criteria_max_count']
@@ -175,29 +177,23 @@ def get_eligible_members_time_dependent(db, eligible_members, matching_context, 
     if not pd.isna(fam_has_children) and fam_has_children==0:
         assert np.all(list(map(pd.isna, child_criteria))), "Member is not allowed to have children, but there are other criteria on the children?"
 
-    TrackTime("Retrieve children")
-    # Filter on existing children (at the time of 'timestamp')
-    if all_children is None:
-        query = "select * from member_family_member where type='child'"
-        all_children = pd.read_sql_query(query, db)
-
-    TrackTime("calc children age")
+    if tracktime: TrackTime("calc children age")
     rel_children = copy.copy(all_children[all_children['user_id'].isin(eligible_members['id'])])
     rel_children['age'] = rel_children['date_of_birth'].apply(lambda born: calculate_age_at(born, timestamp.date()))
     rel_children = rel_children[rel_children['age'] >= 0]
 
-    TrackTime("calc children count")
+    if tracktime: TrackTime("calc children count")
     # Count number of children with age >= 0
     children_counts = rel_children.groupby('user_id').aggregate(children_count=('id','count')).reset_index().rename(columns={'user_id':'id'})
     # Merge children_count column into members table, and put members without chilldren on zero count
     eligible_members = pd.merge(eligible_members, children_counts, how='left', on='id')
     eligible_members['children_count'] = eligible_members['children_count'].fillna(0).astype(int)
 
-    TrackTime("calc family_count")
+    if tracktime: TrackTime("calc family_count")
     # Calculate family count
     if not pd.isna(fam_min_count) or not pd.isna(fam_max_count):
-        query = "select * from member_family_member where type='partner'"
-        all_partners = pd.read_sql_query(query, db)
+        # query = "select * from member_family_member where type='partner'"
+        # all_partners = pd.read_sql_query(query, db)
         rel_partners = all_partners[all_partners['user_id'].isin(eligible_members['id'])]
         partner_counts = rel_partners.groupby('user_id').aggregate(partner_count=('id','count')).reset_index().rename(columns={'user_id':'id'})
         # Merge partner_count column into members table, and put members without partner on zero count
@@ -205,7 +201,7 @@ def get_eligible_members_time_dependent(db, eligible_members, matching_context, 
         eligible_members['partner_count'] = eligible_members['partner_count'].fillna(0).astype(int)
         eligible_members['family_count'] = eligible_members['children_count'] + eligible_members['partner_count']
 
-    TrackTime("family_count criteria")
+    if tracktime: TrackTime("family_count criteria")
     # Family count criteria
     if not pd.isna(fam_min_count):
         eligible_members = eligible_members[eligible_members['family_count'] >= fam_min_count]
@@ -213,7 +209,7 @@ def get_eligible_members_time_dependent(db, eligible_members, matching_context, 
         eligible_members = eligible_members[eligible_members['family_count'] <= fam_max_count]
     if verbose: print("nr eligible_members fam_count range:", len(eligible_members))
 
-    TrackTime("has_children criteria")
+    if tracktime: TrackTime("has_children criteria")
     # Has children criteria
     if not pd.isna(fam_has_children):
         if fam_has_children:
@@ -224,7 +220,7 @@ def get_eligible_members_time_dependent(db, eligible_members, matching_context, 
             return eligible_members
     if verbose: print("nr eligible_members has_children:", len(eligible_members))
 
-    TrackTime("other children criteria")
+    if tracktime: TrackTime("other children criteria")
     # Children criteria
     if not pd.isna(fam_child_min_age):
         rel_children = rel_children[rel_children['age'] >= fam_child_min_age]
@@ -244,7 +240,7 @@ def get_eligible_members_time_dependent(db, eligible_members, matching_context, 
     return eligible_members
 
 
-def get_eligible_members_static(db, eligible_members, matching_context, all_member_categories=None, verbose=False):
+def get_eligible_members_static(eligible_members, matching_context, all_partners, all_member_categories, verbose=False, tracktime=False):
     """ Function that applies 'static' criteria.
     'static' in the sense that the result of the criteria should not change
     over (a short) time. In this case, because I only received a snapshot of the
@@ -252,19 +248,17 @@ def get_eligible_members_static(db, eligible_members, matching_context, all_memb
     Things like: community, subscribed categories, gender, partners
     """
 
-    TrackTime("gender criteria")
+    if tracktime: TrackTime("gender criteria")
     # Gender criteria
     required_gender = matching_context['member_criteria_gender']
     if not pd.isna(required_gender):
         eligible_members = eligible_members[eligible_members['gender'] == required_gender]
     if verbose: print("nr eligible_members gender:", len(eligible_members))
 
-    TrackTime("is_single criteria")
+    if tracktime: TrackTime("is_single criteria")
     # Single or has partner criteria
     has_to_be_single = matching_context['family_criteria_is_single']
     if not pd.isna(has_to_be_single):
-        query = "select * from member_family_member where type='partner'"
-        all_partners = pd.read_sql_query(query, db)
 
         if has_to_be_single:
             eligible_members = eligible_members[~eligible_members['id'].isin(all_partners['user_id'])]
@@ -272,18 +266,11 @@ def get_eligible_members_static(db, eligible_members, matching_context, all_memb
             eligible_members = eligible_members[eligible_members['id'].isin(all_partners['user_id'])]
     if verbose: print("nr eligible_members has_to_be_single:", len(eligible_members))
 
-    TrackTime("category_id criteria")
+    if tracktime: TrackTime("category_id criteria")
     # Member must be subscribed to category
     coupon_category_id = matching_context['category_id']
     if not pd.isna(coupon_category_id):
-        TrackTime("Retrieve category table")
-        if all_member_categories is None:
-            query = "select * from member_category where category_id=%d"%coupon_category_id
-            members_subscribed_to_coupon_cat = pd.read_sql_query(query, db)
-        else:
-            members_subscribed_to_coupon_cat = all_member_categories[all_member_categories['category_id'] == coupon_category_id]
-
-        TrackTime("category_id criteria")
+        members_subscribed_to_coupon_cat = all_member_categories[all_member_categories['category_id'] == coupon_category_id]
         eligible_members = eligible_members[eligible_members['id'].isin(members_subscribed_to_coupon_cat['member_id'])]
     if verbose: print("nr eligible_members category:", len(eligible_members))
 
