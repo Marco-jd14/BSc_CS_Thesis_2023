@@ -162,7 +162,7 @@ def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
             datetimestamp = coupon_row['status_updated_at']
 
             TrackTime("Check expected timestamp")
-            checked_expiries = determine_coupon_checked_expiry_time(coupon_row['created_at'], coupon_row['accept_time'])
+            checked_expiries = determine_coupon_checked_expiry_time(coupon_row['created_at'], coupon_row['accept_time'], check=True)
             if checked_expiries is None:
                 checked_expiries = [datetimestamp]
 
@@ -228,7 +228,7 @@ def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
 
 
 
-def determine_coupon_checked_expiry_time(created_at, accept_time):
+def determine_coupon_checked_expiry_time(created_at, accept_time, check=False):
     """ Function that determines / predicts the time a coupon is sent
     to the next member once it expires (i.e. the member has not replied)
     """
@@ -246,7 +246,7 @@ def determine_coupon_checked_expiry_time(created_at, accept_time):
             checked_expiry = dt.datetime.combine(expired.date() + dt.timedelta(days=1), ten_am)
 
         # 29 okt 2021 was a day with (presumable) IT issues: ignore data
-        if checked_expiry.date() == dt.date(2021, 10, 29):
+        if check and checked_expiry.date() == dt.date(2021, 10, 29):
             return None
 
         return [checked_expiry]
@@ -271,7 +271,7 @@ def determine_coupon_checked_expiry_time(created_at, accept_time):
 
         else:
             # 28 sept 2022 was a day with (presumably) IT issues: ignore data
-            if expired.date() == dt.date(2022, 9, 28):
+            if check and expired.date() == dt.date(2022, 9, 28):
                 return None
 
             # If a coupon expired, it is usually sent to the next member at the next 5th minute of the hour

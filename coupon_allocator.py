@@ -13,7 +13,9 @@ import numpy as np
 import pandas as pd
 import datetime as dt
 from pprint import pprint
+import matplotlib.pyplot as plt
 from database.lib.tracktime import TrackTime, TrackReport
+
 np.random.seed(0)
 
 import database.connect_db as connect_db
@@ -32,10 +34,14 @@ def main():
 
     try:
         preparation = prepare_allocator(db)
-        allocate_coupons(*preparation)
+        events_df = allocate_coupons(*preparation)
     except:
         print("\n",traceback.format_exc())
         db.close()
+
+    TrackTime("Export")
+    export_path = './timelines/events_list_%s.xlsx'%(str(dt.datetime.now().strftime("%Y.%m.%d-%H.%M.%S")))
+    events_df.to_excel(export_path, "events")
 
     print("")
     TrackReport()
@@ -56,6 +62,23 @@ def prepare_allocator(db):
     relevant_issue_columns = ['id','offer_id','sent_at','amount','expires_at']
     filtered_issues = filtered_issues[relevant_issue_columns]
     filtered_issues = filtered_issues.sort_values(by='sent_at').reset_index(drop=True)
+
+    # # res = filtered_issues
+    # res = filtered_issues[['offer_id','sent_at','expires_at','amount','total_issued','nr_accepted']][filtered_issues['sent_at'] == filtered_issues['expires_at']]
+    # print(res)
+    # print(np.all(res['total_issued'] == 1))
+    # print(np.all(res['amount'] == 1))
+    # print(np.sum(res['nr_accepted']))
+
+    # to_join = filtered_offers[['id','redeem_till','redeem_type']]
+    # res = pd.merge(res, to_join, left_on='offer_id', right_on='id')
+    # print(res['redeem_till'].unique())
+    # print(res['redeem_type'].unique())
+    # print(res.groupby('redeem_type').aggregate(count=('id','count')))
+    # print(res.groupby('redeem_till').aggregate(count=('id','count')))
+    
+    # # print(filtered_issues[['sent_at','expires_at']][filtered_issues['sent_at'] == filtered_issues['expires_at']])
+    # sys.exit()
 
     relevant_offer_columns = ['id', 'category_id', 'accept_time', 'member_criteria_gender', 'member_criteria_min_age',
                               'member_criteria_max_age', 'family_criteria_min_count', 'family_criteria_max_count',
@@ -102,12 +125,132 @@ def prepare_allocator(db):
 
 # Relevant events according to the coupon lifecycle
 class Event(enum.Enum):
-    member_declined     = 0
-    member_accepted     = 1
+    member_accepted     = 0
+    member_declined     = 1
     member_let_expire   = 2 # i.e. after 3 days
-    coupon_available    = 5
-    coupon_sent         = 3
-    coupon_expired      = 4 # i.e. after 1 month
+    coupon_available    = 3
+    coupon_sent         = 4
+    coupon_expired      = 5 # i.e. after 1 month
+
+    def __lt__(self, other):
+        self.value < other.value
+
+
+def release_new_issue(issue, max_existing_coupon_id, max_existing_coupon_follow_id,
+                      verbose):
+
+    new_coupon_ids        = np.arange(issue['amount']) + max_existing_coupon_id + 1
+    new_coupon_follow_ids = np.arange(issue['amount']) + max_existing_coupon_follow_id + 1
+    max_existing_coupon_id        += issue['amount']
+    max_existing_coupon_follow_id += issue['amount']
+
+    add_to_queue = []
+    for new_id, new_follow_id in zip(new_coupon_ids, new_coupon_follow_ids):
+        new_coupon = (issue['sent_at'], new_id, new_follow_id, issue['id'], issue['offer_id'])
+        add_to_queue.append(new_coupon)
+
+
+    came_available_coupons = list(map(lambda my_tuple: [Event.coupon_available] + list(my_tuple), add_to_queue))
+    
+
+    return (max_existing_coupon_id, max_existing_coupon_follow_id), (add_to_queue, came_available_coupons)
+
+
+def simulate_member_responses(batch_utility, member_indices, coupon_indices, coupon_index_to_id,
+                              member_index_to_id, batch_to_send, time_of_sending_next_batch, offers, verbose):
+
+    TrackTime("Simulating accepted coupons")
+    # Simulate if coupon will be accepted or not
+    accept_probabilites = batch_utility[member_indices, coupon_indices]
+    coupon_accepted = np.random.uniform(0, 1, size=len(accept_probabilites)) < accept_probabilites
+
+    percent_available_time_used = np.random.uniform(0, 1, size=np.sum(coupon_accepted))
+    accepted_coupons = []
+    for i, (member_index, coupon_index) in enumerate(zip(member_indices[coupon_accepted], coupon_indices[coupon_accepted])):
+        assert coupon_index_to_id[coupon_index] == batch_to_send[coupon_index][COUPON_ID_COLUMN]
+        accept_time = offers.loc[batch_to_send[coupon_index][OFFER_ID_COLUMN], 'accept_time']
+        accept_time = time_of_sending_next_batch + dt.timedelta(days=float(accept_time)) * percent_available_time_used[i]
+
+        accepted_coupon = [Event.member_accepted, accept_time] + list(batch_to_send[coupon_index])[1:] + [member_index_to_id[member_index]]
+        accepted_coupons.append(accepted_coupon)
+
+
+    TrackTime("Simulating non-accepted coupons")
+    # Simulate if coupon will be declined or no response (expire)
+    P_let_expire = 0.5  # TODO: improve upon P_let_expire?
+    coupon_let_expire = np.random.uniform(0, 1, size=np.sum(~coupon_accepted)) < P_let_expire
+    # TODO: realistic decline time
+    percent_available_time_used = np.random.uniform(0, 1, size=np.sum(~coupon_accepted))
+
+    not_accepted_coupons = []
+    for i, (member_index, coupon_index) in enumerate(zip(member_indices[~coupon_accepted], coupon_indices[~coupon_accepted])):
+        assert coupon_index_to_id[coupon_index] == batch_to_send[coupon_index][COUPON_ID_COLUMN]
+        if coupon_let_expire[i]:
+            # print("let expire:", coupon_index)
+            accept_time = offers.loc[batch_to_send[coupon_index][OFFER_ID_COLUMN], 'accept_time']
+            expire_time = determine_coupon_checked_expiry_time(time_of_sending_next_batch, float(accept_time))
+            expire_time = expire_time[0] # Take first of suggested possible expiry times
+            event = [Event.member_let_expire, expire_time] + list(batch_to_send[coupon_index])[1:] + [member_index_to_id[member_index]]
+        else:
+            # print("declined:", coupon_index)
+            accept_time = offers.loc[batch_to_send[coupon_index][OFFER_ID_COLUMN], 'accept_time']
+            decline_time = time_of_sending_next_batch + dt.timedelta(days=float(accept_time)) * percent_available_time_used[i]
+            event = [Event.member_declined, decline_time] + list(batch_to_send[coupon_index])[1:] + [member_index_to_id[member_index]]
+
+        not_accepted_coupons.append(event)
+
+
+    return accepted_coupons, not_accepted_coupons
+
+
+def re_release_non_accepted_coupons(not_accepted_coupons, issues, max_existing_coupon_id):
+    # Check if non-accepted coupons can be re-allocated to new members
+    came_available_coupons = []
+    expired_coupons = []
+    add_to_queue = []
+    
+    for not_accepted_coupon in not_accepted_coupons:
+        # Do a +1 here because the event column in included in the not_accepted_coupon-object
+        coupon_expires_at = issues.loc[not_accepted_coupon[ISSUE_ID_COLUMN+1],'expires_at']
+        # coupon_expires_at = expire_times.loc[not_accepted_coupon[ISSUE_ID_COLUMN+1]]
+        coupon_came_available_at = not_accepted_coupon[TIMESTAMP_COLUMN+1]
+
+        if coupon_came_available_at < coupon_expires_at:
+            # Coupon is not expired yet, add back to queue of coupons
+            new_coupon_id = max_existing_coupon_id + 1
+            max_existing_coupon_id += 1
+
+            event = [Event.coupon_available, not_accepted_coupon[1], new_coupon_id] + not_accepted_coupon[3:-1] + [np.nan]
+            came_available_coupons.append(event)
+            new_coupon = tuple([not_accepted_coupon[1], new_coupon_id] + not_accepted_coupon[3:-1])
+            add_to_queue.append(new_coupon)
+        else:
+            # Coupon is expired
+            event = [Event.coupon_expired, coupon_expires_at, np.nan] + not_accepted_coupon[3:-1] + [np.nan]
+            expired_coupons.append(event)
+
+    return max_existing_coupon_id, (came_available_coupons, expired_coupons, add_to_queue)
+
+
+def send_out_chosen_coupons(BATCH_SIZE, member_indices, coupon_indices, coupon_index_to_id, member_index_to_id,
+                            batch_to_send, time_of_sending_next_batch):
+
+    # Add the coupons, that were not allocated, back to the queue
+    add_to_queue = []
+    non_allocated_coupons = set(np.arange(BATCH_SIZE)) - set(coupon_indices)
+    for coupon_index in non_allocated_coupons:
+        assert coupon_index_to_id[coupon_index] == batch_to_send[coupon_index][COUPON_ID_COLUMN]
+        add_to_queue.append(batch_to_send[coupon_index])
+
+    # TODO: batch_to_send --> remove TIMESTAMP_COLUMN, add MEMBER_ID
+    sent_coupons = []
+    for member_index, coupon_index in zip(member_indices, coupon_indices):
+        assert coupon_index_to_id[coupon_index] == batch_to_send[coupon_index][COUPON_ID_COLUMN]
+        sent_coupon = [Event.coupon_sent, time_of_sending_next_batch] + list(batch_to_send[coupon_index])[1:] + [member_index_to_id[member_index]]
+        sent_coupons.append(sent_coupon)
+
+    return add_to_queue, sent_coupons
+
 
 
 # def allocate_resources(resources_stream, resources_properties, agents, utility_values, utility_indices):
@@ -119,6 +262,7 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
     print(utility_values.shape)
 
     # The supporting info could be re-retrieved from the database constantly, but doing it only once improves performance
+    offers = supporting_info[0]
 
     BATCH_SIZE = 1
 
@@ -128,49 +272,41 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
     events_list = []
     events_df = pd.DataFrame(columns=['event','at','coupon_id','coupon_follow_id','issue_id','offer_id','member_id'])
 
-    unsorted_queue_of_coupons = []
+    timestamps = []
 
+    # Initialize queue and define the columns of an element in the queue
+    unsorted_queue_of_coupons = []
+    global TIMESTAMP_COLUMN, COUPON_ID_COLUMN, ISSUE_ID_COLUMN, OFFER_ID_COLUMN
+    TIMESTAMP_COLUMN, COUPON_ID_COLUMN, ISSUE_ID_COLUMN, OFFER_ID_COLUMN = 0, 1, 3, 4
+
+    # Loop over all issues to release
     for issue_counter, (issue_id, issue) in enumerate(issues.iterrows()):
         TrackTime("print")
-        if True or issue_counter%100 == 0:
+        if issue_counter%20 == 0:
             print("\rissue nr %d (%.1f%%)"%(issue_counter,100*issue_counter/len(issues)), end='')
+            timestamps.append(dt.datetime.now())
 
-        if issue_counter>100:
-            break
+        # if issue_counter>1000:
+        #     break
 
 
-        TrackTime("Making new_coupons df")
-        new_coupons = pd.DataFrame(issue['amount']*[issue['sent_at']], columns=['available_from'])
 
-        TrackTime("Filling new_coupons df")
-        new_coupons['coupon_id'] = np.arange(issue['amount']) + max_existing_coupon_id + 1
-        max_existing_coupon_id += issue['amount']
-        new_coupons['coupon_follow_id'] = np.arange(issue['amount']) + max_existing_coupon_follow_id + 1
-        max_existing_coupon_follow_id += issue['amount']
-
-        new_coupons['issue_id'] = issue['id']
-        new_coupons['offer_id'] = issue['offer_id']
-
-        # Convert rows of dataframe to list of tuples
-        TrackTime("Converting df to list[tuple]")
-        add_to_queue = list(map(tuple, new_coupons.values))
-        unsorted_queue_of_coupons.extend(add_to_queue)
-
-        came_available_coupons = list(map(lambda my_tuple: [Event.coupon_available] + list(my_tuple), add_to_queue))
-        events_list.extend(came_available_coupons)
+        TrackTime("Releasing new issue")
+        max_coupon_ids, coupon_lists = release_new_issue(issue, max_existing_coupon_id,
+                                                         max_existing_coupon_follow_id, verbose)
+        max_existing_coupon_id, max_existing_coupon_follow_id = max_coupon_ids
+        add_to_queue, came_available_coupons = coupon_lists
 
         if verbose:
             print("Came available:")
             print(came_available_coupons)
+        unsorted_queue_of_coupons.extend(add_to_queue)
+        events_list.extend(came_available_coupons)
+
+
 
         if len(unsorted_queue_of_coupons) < BATCH_SIZE:
             continue # Not enough coupon in queue to reach minimum of BATCH_SIZE
-
-
-        TIMESTAMP_COLUMN = 0
-        COUPON_ID_COLUMN = 1
-        ISSUE_ID_COLUMN  = 3
-        OFFER_ID_COLUMN  = 4
 
 
         TrackTime("Sorting coupon queue")
@@ -186,25 +322,19 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
                 continue
 
 
-        TrackTime("Filtering relevant issues + offers")
+        TrackTime("Extracting batch")
         # TODO: send out all coupons that were created before the time at [BATCH_SIZE]
         batch_to_send = unsorted_queue_of_coupons[:BATCH_SIZE]
         unsorted_queue_of_coupons = unsorted_queue_of_coupons[BATCH_SIZE:]
 
-        # Extract the offers relevant for this batch, from the supporting_info
-        relevant_offers = supporting_info[0].loc[np.unique(list(map(lambda my_tuple: my_tuple[OFFER_ID_COLUMN], batch_to_send))),:]
-        accept_times = relevant_offers['accept_time']
-        # Extract the issue relevant for this batch
-        relevant_issues = issues.loc[np.unique(list(map(lambda my_tuple: my_tuple[ISSUE_ID_COLUMN], batch_to_send))),:]
-        expire_times = relevant_issues['expires_at']
-
+        TrackTime("Checking expiry")
         # TODO: filter on unexpired coupons? Or send out a batch earlier than desired to prevent expiry
         for coupon in batch_to_send:
-            if expire_times.loc[coupon[ISSUE_ID_COLUMN]] == relevant_issues.loc[coupon[ISSUE_ID_COLUMN],'sent_at']:
+            if issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at'] == issues.loc[coupon[ISSUE_ID_COLUMN],'sent_at']:
                 # If the issue expires the moment the coupons are sent out, we tolerate one round of sending out coupons, even if it is at most a few days after expiry
-                assert abs(time_of_sending_next_batch - expire_times.loc[coupon[ISSUE_ID_COLUMN]]) < dt.timedelta(days=3)
+                assert abs(time_of_sending_next_batch - issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at']) < dt.timedelta(days=3)
             else:
-                assert time_of_sending_next_batch < expire_times.loc[coupon[ISSUE_ID_COLUMN]], "Trying to send out a coupon at %s which already expired at %s"%(time_of_sending_next_batch, expire_times.loc[coupon[ISSUE_ID_COLUMN]])
+                assert time_of_sending_next_batch < issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at'], "Trying to send out a coupon at %s which already expired at %s"%(time_of_sending_next_batch, issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at'])
 
 
         TrackTime("Filtering relevant utilies")
@@ -217,107 +347,47 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
         member_indices, coupon_indices = np.nonzero(X_a_r)
 
 
-        TrackTime("Making sent-at events")
-        # Add the coupon that were not allocated back to the queue
-        non_allocated_coupons = set(np.arange(BATCH_SIZE)) - set(coupon_indices)
-        for coupon_index in non_allocated_coupons:
-            assert coupon_index_to_id[coupon_index] == batch_to_send[coupon_index][COUPON_ID_COLUMN]
-            unsorted_queue_of_coupons.append(batch_to_send[coupon_index])
-
 
         TrackTime("Making sent-at events")
-        # TODO: batch_to_send --> remove TIMESTAMP_COLUMN, add MEMBER_ID
-        sent_coupons = []
-        for member_index, coupon_index in zip(member_indices, coupon_indices):
-            assert coupon_index_to_id[coupon_index] == batch_to_send[coupon_index][COUPON_ID_COLUMN]
-            sent_coupon = [Event.coupon_sent, time_of_sending_next_batch] + list(batch_to_send[coupon_index])[1:] + [member_index_to_id[member_index]]
-            sent_coupons.append(sent_coupon)
-
+        unsent_coupons, sent_coupons = send_out_chosen_coupons(BATCH_SIZE, member_indices, coupon_indices, coupon_index_to_id,
+                                                               member_index_to_id, batch_to_send, time_of_sending_next_batch)
         if verbose:
             print("Sent out:")
             print(sent_coupons)
-        events_list.append(sent_coupons)
+        events_list.extend(sent_coupons)
+        unsorted_queue_of_coupons.extend(unsent_coupons)
 
 
-        TrackTime("Simulating accepted coupons")
-        # Simulate if coupon will be accepted or not
-        accept_probabilites = batch_utility[member_indices, coupon_indices]
-        coupon_accepted = np.random.uniform(0, 1, size=len(accept_probabilites)) < accept_probabilites
 
-        percent_available_time_used = np.random.uniform(0, 1, size=np.sum(coupon_accepted))
-        accepted_coupons = []
-        for i, (member_index, coupon_index) in enumerate(zip(member_indices[coupon_accepted], coupon_indices[coupon_accepted])):
-            assert coupon_index_to_id[coupon_index] == batch_to_send[coupon_index][COUPON_ID_COLUMN]
-            # TODO: accept time basen offer['accept_time']
-            accept_time = accept_times.loc[batch_to_send[coupon_index][OFFER_ID_COLUMN]]
-            accept_time = time_of_sending_next_batch + dt.timedelta(days=float(accept_time)) * percent_available_time_used[i]
-            accepted_coupon = [Event.member_accepted, accept_time] + list(batch_to_send[coupon_index])[1:] + [member_index_to_id[member_index]]
-            accepted_coupons.append(accepted_coupon)
-
+        # Simulate the member responses of those coupons that were sent out
+        accepted_coupons, not_accepted_coupons = simulate_member_responses(batch_utility, member_indices, coupon_indices,
+                                                                            coupon_index_to_id, member_index_to_id, batch_to_send,
+                                                                            time_of_sending_next_batch, offers, verbose)
         if verbose:
             print("Accepted:")
             print(accepted_coupons)
-        events_list.extend(accepted_coupons)
-
-
-        TrackTime("Simulating non-accepted coupons")
-        # Simulate if coupon will be declined or no response (expire)
-        P_let_expire = 0.5  # TODO: improve upon P_let_expire?
-        coupon_let_expire = np.random.uniform(0, 1, size=np.sum(~coupon_accepted)) < P_let_expire
-        # TODO: realistic decline time
-        percent_available_time_used = np.random.uniform(0, 1, size=np.sum(~coupon_accepted))
-
-        not_accepted_coupons = []
-        for i, (member_index, coupon_index) in enumerate(zip(member_indices[~coupon_accepted], coupon_indices[~coupon_accepted])):
-            assert coupon_index_to_id[coupon_index] == batch_to_send[coupon_index][COUPON_ID_COLUMN]
-            if coupon_let_expire[i]:
-                # print("let expire:", coupon_index)
-                accept_time = accept_times.loc[batch_to_send[coupon_index][OFFER_ID_COLUMN]]
-                expire_time = determine_coupon_checked_expiry_time(time_of_sending_next_batch, float(accept_time))
-                expire_time = expire_time[0] # Take first of suggested possible expiry times
-                event = [Event.member_let_expire, expire_time] + list(batch_to_send[coupon_index])[1:] + [member_index_to_id[member_index]]
-            else:
-                # print("declined:", coupon_index)
-                accept_time = accept_times.loc[batch_to_send[coupon_index][OFFER_ID_COLUMN]]
-                decline_time = time_of_sending_next_batch + dt.timedelta(days=float(accept_time)) * percent_available_time_used[i]
-                event = [Event.member_declined, decline_time] + list(batch_to_send[coupon_index])[1:] + [member_index_to_id[member_index]]
-
-            not_accepted_coupons.append(event)
-
-        if verbose:
+            print("Not accepted:")
             print(not_accepted_coupons)
+        events_list.extend(accepted_coupons)
         events_list.extend(not_accepted_coupons)
 
 
-        TrackTime("Checking non-accepted coupon-expiry")
-        # Check if non-accepted coupons can be re-allocated to new members
-        came_available_coupons = []
-        expired_coupons = []
-        for not_accepted_coupon in not_accepted_coupons:
-            # Do a +1 here because the event column in included in the not_accepted_coupon-object
-            coupon_expires_at = expire_times.loc[not_accepted_coupon[ISSUE_ID_COLUMN+1]]
-            coupon_came_available_at = not_accepted_coupon[TIMESTAMP_COLUMN+1]
 
-            if coupon_came_available_at < coupon_expires_at:
-                # Coupon is not expired yet, add back to queue of coupons
-                event = [Event.coupon_available] + not_accepted_coupon[1:]
-                came_available_coupons.append(event)
-                add_to_queue = tuple(not_accepted_coupon[1:-1])
-                unsorted_queue_of_coupons.append(add_to_queue)
-            else:
-                # Coupon is expired
-                event = [Event.coupon_expired, coupon_expires_at] + not_accepted_coupon[2:-1] + [np.nan]
-                expired_coupons.append(event)
+        # Check if not-accepted coupons can be re-allocated, or have expired
+        TrackTime("Checking non-accepted coupon-expiry")
+        max_existing_coupon_id, lists_of_coupons = re_release_non_accepted_coupons(not_accepted_coupons, issues,
+                                                                                   max_existing_coupon_id)
+        came_available_coupons, expired_coupons, add_to_queue = lists_of_coupons
 
         if verbose:
             print("Came newly available:")
             print(came_available_coupons)
-        events_list.extend(came_available_coupons)
-
-        if verbose:
             print("Expired:")
             print(expired_coupons)
+        unsorted_queue_of_coupons.extend(add_to_queue)
+        events_list.extend(came_available_coupons)
         events_list.extend(expired_coupons)
+
 
         # TODO: retrigger sending out batch if possible
         # TrackTime("Checking if batch ready")
@@ -331,7 +401,11 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
         #     else:
         #         Send out another batch
 
-
+    TrackTime("Make events df")
+    events_df = pd.DataFrame(events_list, columns=events_df.columns)
+    events_df = events_df.sort_values(by=['at','event']).reset_index(drop=True)
+    plt.plot(timestamps)
+    return events_df
 
 
 def greedy(Uar, verbose=False):
@@ -432,8 +506,8 @@ def get_all_eligible_members(batch_to_send, members, supporting_info):
         # offer = offers[offers['id'] == offer_id].squeeze()
         offer = offers.loc[offer_id, :].squeeze()
         TrackTime("get all eligible members")
-        eligible_members = get_eligible_members_static(        members, offer, all_partners, all_member_categories, tracktime=False)
-        eligible_members = get_eligible_members_time_dependent(members, offer, all_partners, all_children, batch_sent_at, tracktime=False)
+        eligible_members = get_eligible_members_static(        members, offer, all_partners, all_member_categories, tracktime=True)
+        eligible_members = get_eligible_members_time_dependent(members, offer, all_partners, all_children, batch_sent_at, tracktime=True)
 
         # TODO: get eligible_members based on historically received coupons / pending coupons
 
