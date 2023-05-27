@@ -8,6 +8,7 @@ Created on Wed May 24 20:46:00 2023
 import sys
 import copy
 import enum
+import traceback
 import numpy as np
 import pandas as pd
 import datetime as dt
@@ -29,8 +30,12 @@ def main():
     db   = connect_db.establish_database_connection(conn)
     print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
 
-    preparation = prepare_allocator(db)
-    allocate_coupons(*preparation)
+    try:
+        preparation = prepare_allocator(db)
+        allocate_coupons(*preparation)
+    except:
+        print("\n",traceback.format_exc())
+        db.close()
 
     print("")
     TrackReport()
@@ -106,7 +111,7 @@ class Event(enum.Enum):
 
 
 # def allocate_resources(resources_stream, resources_properties, agents, utility_values, utility_indices):
-def allocate_coupons(issues, members, utility_values, utility_indices, supporting_info=None):
+def allocate_coupons(issues, members, utility_values, utility_indices, supporting_info=None, verbose=False):
     # members = agents
     # offers = unique resources
     # issues = stream of resources
@@ -115,7 +120,7 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
 
     # The supporting info could be re-retrieved from the database constantly, but doing it only once improves performance
 
-    BATCH_SIZE = 10
+    BATCH_SIZE = 1
 
     max_existing_coupon_id = -1
     max_existing_coupon_follow_id = -1
@@ -125,10 +130,13 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
 
     unsorted_queue_of_coupons = []
 
-    for i, issue in issues.iterrows():
+    for issue_counter, (issue_id, issue) in enumerate(issues.iterrows()):
         TrackTime("print")
-        if i%100 == 0:
-            print("\rissue nr %d (%.1f%%)"%(i,100*i/len(issues)), end='')
+        if True or issue_counter%100 == 0:
+            print("\rissue nr %d (%.1f%%)"%(issue_counter,100*issue_counter/len(issues)), end='')
+
+        if issue_counter>100:
+            break
 
 
         TrackTime("Making new_coupons df")
@@ -150,8 +158,10 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
 
         came_available_coupons = list(map(lambda my_tuple: [Event.coupon_available] + list(my_tuple), add_to_queue))
         events_list.extend(came_available_coupons)
-        print("Came available:")
-        print(came_available_coupons)
+
+        if verbose:
+            print("Came available:")
+            print(came_available_coupons)
 
         if len(unsorted_queue_of_coupons) < BATCH_SIZE:
             continue # Not enough coupon in queue to reach minimum of BATCH_SIZE
@@ -168,8 +178,8 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
 
         TrackTime("Checking if batch ready")
         time_of_sending_next_batch = unsorted_queue_of_coupons[BATCH_SIZE-1][TIMESTAMP_COLUMN]
-        if i+1 < len(issues):
-            time_of_next_issue = issues['sent_at'].iloc[i+1]
+        if issue_counter+1 < len(issues):
+            time_of_next_issue = issues['sent_at'].iloc[issue_counter+1]
             if time_of_next_issue < time_of_sending_next_batch:
                 # Even though we have enough coupons to reach minimum of BATCH_SIZE,
                 # We first have to process another issue, to include in this next batch
@@ -190,7 +200,11 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
 
         # TODO: filter on unexpired coupons? Or send out a batch earlier than desired to prevent expiry
         for coupon in batch_to_send:
-            assert time_of_sending_next_batch < expire_times.loc[coupon[ISSUE_ID_COLUMN]], "Trying to send out a coupon at %s which already expired at %s"%(time_of_sending_next_batch, expire_times.loc[coupon[ISSUE_ID_COLUMN]])
+            if expire_times.loc[coupon[ISSUE_ID_COLUMN]] == relevant_issues.loc[coupon[ISSUE_ID_COLUMN],'sent_at']:
+                # If the issue expires the moment the coupons are sent out, we tolerate one round of sending out coupons, even if it is at most a few days after expiry
+                assert abs(time_of_sending_next_batch - expire_times.loc[coupon[ISSUE_ID_COLUMN]]) < dt.timedelta(days=3)
+            else:
+                assert time_of_sending_next_batch < expire_times.loc[coupon[ISSUE_ID_COLUMN]], "Trying to send out a coupon at %s which already expired at %s"%(time_of_sending_next_batch, expire_times.loc[coupon[ISSUE_ID_COLUMN]])
 
 
         TrackTime("Filtering relevant utilies")
@@ -219,8 +233,9 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
             sent_coupon = [Event.coupon_sent, time_of_sending_next_batch] + list(batch_to_send[coupon_index])[1:] + [member_index_to_id[member_index]]
             sent_coupons.append(sent_coupon)
 
-        print("Sent out:")
-        print(sent_coupons)
+        if verbose:
+            print("Sent out:")
+            print(sent_coupons)
         events_list.append(sent_coupons)
 
 
@@ -239,8 +254,9 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
             accepted_coupon = [Event.member_accepted, accept_time] + list(batch_to_send[coupon_index])[1:] + [member_index_to_id[member_index]]
             accepted_coupons.append(accepted_coupon)
 
-        print("Accepted:")
-        print(accepted_coupons)
+        if verbose:
+            print("Accepted:")
+            print(accepted_coupons)
         events_list.extend(accepted_coupons)
 
 
@@ -255,19 +271,21 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
         for i, (member_index, coupon_index) in enumerate(zip(member_indices[~coupon_accepted], coupon_indices[~coupon_accepted])):
             assert coupon_index_to_id[coupon_index] == batch_to_send[coupon_index][COUPON_ID_COLUMN]
             if coupon_let_expire[i]:
-                print("let expire:", coupon_index)
+                # print("let expire:", coupon_index)
                 accept_time = accept_times.loc[batch_to_send[coupon_index][OFFER_ID_COLUMN]]
                 expire_time = determine_coupon_checked_expiry_time(time_of_sending_next_batch, float(accept_time))
+                expire_time = expire_time[0] # Take first of suggested possible expiry times
                 event = [Event.member_let_expire, expire_time] + list(batch_to_send[coupon_index])[1:] + [member_index_to_id[member_index]]
             else:
-                print("declined:", coupon_index)
+                # print("declined:", coupon_index)
                 accept_time = accept_times.loc[batch_to_send[coupon_index][OFFER_ID_COLUMN]]
                 decline_time = time_of_sending_next_batch + dt.timedelta(days=float(accept_time)) * percent_available_time_used[i]
                 event = [Event.member_declined, decline_time] + list(batch_to_send[coupon_index])[1:] + [member_index_to_id[member_index]]
 
             not_accepted_coupons.append(event)
 
-        print(not_accepted_coupons)
+        if verbose:
+            print(not_accepted_coupons)
         events_list.extend(not_accepted_coupons)
 
 
@@ -291,21 +309,32 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
                 event = [Event.coupon_expired, coupon_expires_at] + not_accepted_coupon[2:-1] + [np.nan]
                 expired_coupons.append(event)
 
-        print("Came newly available:")
-        print(came_available_coupons)
+        if verbose:
+            print("Came newly available:")
+            print(came_available_coupons)
         events_list.extend(came_available_coupons)
 
-        print("Expired:")
-        print(expired_coupons)
+        if verbose:
+            print("Expired:")
+            print(expired_coupons)
         events_list.extend(expired_coupons)
 
-        if i>50:
-            break
+        # TODO: retrigger sending out batch if possible
+        # TrackTime("Checking if batch ready")
+        # time_of_sending_next_batch = unsorted_queue_of_coupons[BATCH_SIZE-1][TIMESTAMP_COLUMN]
+        # if issue_counter+1 < len(issues):
+        #     time_of_next_issue = issues['sent_at'].iloc[issue_counter+1]
+        #     if time_of_next_issue < time_of_sending_next_batch:
+        #         # Even though we have enough coupons to reach minimum of BATCH_SIZE,
+        #         # We first have to process another issue, to include in this next batch
+        #         continue
+        #     else:
+        #         Send out another batch
 
 
 
 
-def greedy(Uar):
+def greedy(Uar, verbose=False):
     nr_A, nr_R = Uar.shape
     # print("nr agents: %d,  nr resources: %d"%(nr_A, nr_R))
     assert nr_A >= nr_R
@@ -317,12 +346,12 @@ def greedy(Uar):
 
         nr_members_assigned_to_resource = np.sum(Xar, axis=0)
         if np.all(nr_members_assigned_to_resource > 0):
-            print("All resources allocated after %d iterations"%i)
+            if verbose: print("All resources allocated after %d iterations"%i)
             return Xar # Every resource is already allocated
 
         nr_resources_allocated_to_members = np.sum(Xar, axis=1)
         if np.all(nr_resources_allocated_to_members > 0):
-            print("All members have a resource after %d iterations"%i)
+            if verbose: print("All members have a resource after %d iterations"%i)
             return Xar # Every member already as a resource
 
         if nr_members_assigned_to_resource[r] > 0:
@@ -381,7 +410,7 @@ def filter_relevant_utilities(batch_to_send, members, utility_values, utility_in
     member_index_to_id = all_eligible_member_ids
 
     assert rel_utility_values.shape == (len(member_index_to_id), len(coupon_index_to_id))
-    print(rel_utility_values.shape, "-->", utility_values.shape)
+    # print(utility_values.shape, "-->", rel_utility_values.shape)
     return rel_utility_values, (coupon_index_to_id, member_index_to_id)
 
 
