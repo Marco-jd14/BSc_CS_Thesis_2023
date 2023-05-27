@@ -284,7 +284,7 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
 
     # The supporting info could be re-retrieved from the database constantly, but doing it only once improves performance
 
-    BATCH_SIZE = 1
+    BATCH_SIZE = 5
 
     max_existing_coupon_id = -1
     max_existing_coupon_follow_id = -1
@@ -298,17 +298,11 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
     global TIMESTAMP_COLUMN, COUPON_ID_COLUMN, ISSUE_ID_COLUMN, OFFER_ID_COLUMN
     TIMESTAMP_COLUMN, COUPON_ID_COLUMN, ISSUE_ID_COLUMN, OFFER_ID_COLUMN = 0, 1, 3, 4
 
-    unsorted = False
-
     # Loop over all issues to release
     for issue_counter, (issue_id, issue) in enumerate(issues.iterrows()):
         TrackTime("print")
         if issue_counter%20 == 0:
             print("\rissue nr %d (%.1f%%)"%(issue_counter,100*issue_counter/len(issues)), end='')
-
-        # if issue_counter>1000:
-        #     break
-
 
         # Release the new issue
         max_coupon_ids, coupon_lists = release_new_issue(issue, max_existing_coupon_id,
@@ -321,16 +315,14 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
         unsorted_queue_of_coupons.extend(add_to_queue)
         events_list.extend(came_available_coupons)
 
-
-        counter = 0
+        # Send out the next batch while we have enough coupons
         while is_batch_ready_to_be_sent(unsorted_queue_of_coupons, BATCH_SIZE, issue_counter, issues):
-            counter += 1
-            # if counter > 1:
-            #     print("OMGGG", counter)
 
-            unsorted_queue_of_coupons, events_list, max_existing_coupon_id = send_out_new_batch(issues, members, utility_values, utility_indices,
-                                                                                                supporting_info, unsorted_queue_of_coupons, events_list,
-                                                                                                BATCH_SIZE, max_existing_coupon_id, verbose)
+            result = send_out_new_batch(issues, members, utility_values, utility_indices, supporting_info, events_list,
+                                        unsorted_queue_of_coupons, BATCH_SIZE, max_existing_coupon_id, verbose)
+
+            # Unpack the return values
+            unsorted_queue_of_coupons, events_list, max_existing_coupon_id = result
 
 
     TrackTime("Make events df")
@@ -342,7 +334,7 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
 
 
 def send_out_new_batch(issues, members, utility_values, utility_indices, supporting_info,
-                       unsorted_queue_of_coupons, events_list, BATCH_SIZE, max_existing_coupon_id, verbose):
+                       events_list, unsorted_queue_of_coupons, BATCH_SIZE, max_existing_coupon_id, verbose):
 
     batch_sent_at = unsorted_queue_of_coupons[BATCH_SIZE-1][TIMESTAMP_COLUMN]
 
@@ -352,14 +344,16 @@ def send_out_new_batch(issues, members, utility_values, utility_indices, support
     batch_to_send = unsorted_queue_of_coupons[:BATCH_SIZE]
     unsorted_queue_of_coupons = unsorted_queue_of_coupons[BATCH_SIZE:]
 
-    TrackTime("Checking expiry")
-    # TODO: filter on unexpired coupons? Or send out a batch earlier than desired to prevent expiry
-    for coupon in batch_to_send:
-        if issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at'] == issues.loc[coupon[ISSUE_ID_COLUMN],'sent_at']:
-            # If the issue expires the moment the coupons are sent out, we tolerate one round of sending out coupons, even if it is at most a few days after expiry
-            assert abs(batch_sent_at - issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at']) < dt.timedelta(days=3)
-        else:
-            assert batch_sent_at < issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at'], "Trying to send out a coupon at %s which already expired at %s"%(batch_sent_at, issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at'])
+    if verbose: print("batch:"); pprint(batch_to_send)
+
+    # TrackTime("Checking expiry")
+    # # TODO: filter on unexpired coupons? Or send out a batch earlier than desired to prevent expiry
+    # for coupon in batch_to_send:
+    #     if abs(issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at'] - issues.loc[coupon[ISSUE_ID_COLUMN],'sent_at']) < dt.timedelta(seconds=3):
+    #         # If the issue expires the moment the coupons are sent out, we tolerate one round of sending out coupons, even if it is at most a few days after expiry
+    #         assert abs(batch_sent_at - issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at']) < dt.timedelta(days=3)
+    #     else:
+    #         assert batch_sent_at < issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at'], "Trying to send out a coupon at %s which already expired at %s"%(batch_sent_at, issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at'])
 
 
     TrackTime("Filtering relevant utilies")
@@ -367,10 +361,9 @@ def send_out_new_batch(issues, members, utility_values, utility_indices, support
     batch_utility, batch_indices = filter_relevant_utilities(batch_to_send, members, utility_values, utility_indices, supporting_info)
     coupon_index_to_id, member_index_to_id = batch_indices
 
-
     TrackTime("Determining optimal allocation")
     # Determine allocation of coupons based on utilities
-    X_a_r = greedy(batch_utility)
+    X_a_r = greedy(batch_utility, verbose)
     member_indices, coupon_indices = np.nonzero(X_a_r)
 
 
@@ -391,6 +384,8 @@ def send_out_new_batch(issues, members, utility_values, utility_indices, support
     came_available_coupons, expired_coupons, coupons_for_re_release = lists_of_coupons
 
     if verbose:
+        print("Not sent out:")
+        print(unsent_coupons)
         print("Sent out:")
         print(sent_coupons)
         print("Accepted:")
@@ -418,13 +413,19 @@ def send_out_new_batch(issues, members, utility_values, utility_indices, support
 
 def greedy(Uar, verbose=False):
     nr_A, nr_R = Uar.shape
-    # print("nr agents: %d,  nr resources: %d"%(nr_A, nr_R))
     assert nr_A >= nr_R
     Xar = np.zeros_like(Uar, dtype=int)
+
+    nr_non_eligible_members = np.sum(Uar < 0)
+    nr_eligible_options = np.prod(Uar.shape) - nr_non_eligible_members
 
     # sort the utility-matrix with highest utility first
     rows, cols = np.unravel_index(np.flip(np.argsort(Uar, axis=None)), Uar.shape)
     for i, (a, r) in enumerate(zip(rows,cols)):
+        if i >= nr_eligible_options:
+            # Do not allocate coupons when utilities are negative (aka members not eligible)
+            if verbose: print("Not all resources could be allocated after %d iterations"%i)
+            return Xar
 
         nr_members_assigned_to_resource = np.sum(Xar, axis=0)
         if np.all(nr_members_assigned_to_resource > 0):
@@ -442,7 +443,8 @@ def greedy(Uar, verbose=False):
         if nr_resources_allocated_to_members[a] == 0:
             Xar[a,r] = 1
 
-    print("This should not get printed")
+    if verbose: print("Last coupon allocated on last iteration")
+    assert i == sum(Uar.shape) - 1 * len(Uar.shape)
     return Xar
 
 
@@ -450,7 +452,6 @@ def filter_relevant_utilities(batch_to_send, members, utility_values, utility_in
     member_id_to_index, offer_id_to_index = utility_indices
 
     # Decrease nr columns of utility_values based on relevant offers
-    OFFER_ID_COLUMN = -1
     offer_ids_to_send = list(map(lambda coupon_tuple: coupon_tuple[OFFER_ID_COLUMN], batch_to_send))
     offer_indices_to_send = list(map(lambda offer_id: offer_id_to_index[offer_id], offer_ids_to_send))
     rel_utility_values = utility_values[:, offer_indices_to_send]
@@ -458,7 +459,6 @@ def filter_relevant_utilities(batch_to_send, members, utility_values, utility_in
 
     # Determine for every offer, the set of eligible members
     offer_id_to_eligible_members = get_all_eligible_members(batch_to_send, members, supporting_info)
-
 
     # Make one big set of eligible members
     all_eligible_member_ids = set()
@@ -478,7 +478,8 @@ def filter_relevant_utilities(batch_to_send, members, utility_values, utility_in
         col_indices_to_adjust = np.where(offer_ids_to_send == offer_id)[0]
         assert len(col_indices_to_adjust) > 0
 
-        rel_utility_values[non_eligible_members_indices, col_indices_to_adjust] = -1
+        indices_to_adjust = np.ix_(non_eligible_members_indices, col_indices_to_adjust)
+        rel_utility_values[indices_to_adjust] = -1
 
 
     # Decrease nr rows of utility_values based on eligible members
@@ -487,7 +488,6 @@ def filter_relevant_utilities(batch_to_send, members, utility_values, utility_in
     rel_utility_values = rel_utility_values[all_eligible_member_indices, :]
 
 
-    COUPON_ID_COLUMN = 1
     coupon_index_to_id = list(map(lambda coupon_tuple: coupon_tuple[COUPON_ID_COLUMN], batch_to_send))
     member_index_to_id = all_eligible_member_ids
 
@@ -498,7 +498,6 @@ def filter_relevant_utilities(batch_to_send, members, utility_values, utility_in
 
 def get_all_eligible_members(batch_to_send, members, supporting_info):
     TrackTime("get all eligible members")
-    TIMESTAMP_COLUMN = 0
     batch_sent_at = batch_to_send[-1][TIMESTAMP_COLUMN]
     offers, all_member_categories, all_children, all_partners = supporting_info
 
@@ -518,7 +517,6 @@ def get_all_eligible_members(batch_to_send, members, supporting_info):
         eligible_members = get_eligible_members_time_dependent(members, offer, all_partners, all_children, batch_sent_at, tracktime=True)
 
         # TODO: get eligible_members based on historically received coupons / pending coupons
-
         offer_id_to_eligible_members[offer_id] = eligible_members['id'].values
 
     return offer_id_to_eligible_members
