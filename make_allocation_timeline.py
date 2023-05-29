@@ -13,6 +13,7 @@ import pandas as pd
 import datetime as dt
 from database.lib.tracktime import TrackTime, TrackReport
 
+from coupon_allocator import determine_coupon_checked_expiry_time
 import database.connect_db as connect_db
 import database.query_db as query_db
 Event = query_db.Event
@@ -191,65 +192,6 @@ def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
     return events_df
 
 
-
-def determine_coupon_checked_expiry_time(created_at, accept_time, check=False):
-    """ Function that determines / predicts the time a coupon is sent
-    to the next member once it expires (i.e. the member has not replied)
-    """
-
-    # Check if timestamp is as expected
-    expired = created_at + dt.timedelta(days=accept_time)
-
-    # Before 14 dec 2021, whether coupons had expired was checked every morning at 10am
-    if expired.date() < dt.date(2021, 12, 14):
-        ten_am = dt.time(10, 0, 0)
-        if expired.time() <= ten_am:
-            checked_expiry = dt.datetime.combine(expired.date(), ten_am)
-        else:
-            # If the coupon expired after 10am, the coupons expiry was only noticed the next morning at 10am
-            checked_expiry = dt.datetime.combine(expired.date() + dt.timedelta(days=1), ten_am)
-
-        # 29 okt 2021 was a day with (presumable) IT issues: ignore data
-        if check and checked_expiry.date() == dt.date(2021, 10, 29):
-            return None
-
-        return [checked_expiry]
-        # checked_expiry2 = checked_expiry + dt.timedelta(days=1)
-        # return [checked_expiry, checked_expiry2]
-
-    # After 14 dec 2021, whether coupons had expired was checked every hour, except between 8pm and 8am at night
-    else:
-        eight_pm = dt.time(20, 0, 0)
-        eight_am = dt.time(8, 0, 0)
-        if expired.time() > eight_pm:
-            # If the coupon expired after 20:00, it is sent to the next person at 08:05 the next morning
-            checked_expiry = (expired + dt.timedelta(days=1)).replace(hour=8,minute=5)
-            return [checked_expiry]
-            # checked_expiry2 = expired if expired.time() < dt.time(20, 5, 0) else checked_expiry
-            # return [checked_expiry, checked_expiry2]
-
-        elif expired.time() < eight_am:
-            # If the coupon expired before 08:00, it is sent to the next person at 08:05 the same day
-            checked_expiry = expired.replace(hour=8,minute=5)
-            return [checked_expiry]
-
-        else:
-            # 28 sept 2022 was a day with (presumably) IT issues: ignore data
-            if check and expired.date() == dt.date(2022, 9, 28):
-                return None
-
-            # If a coupon expired, it is usually sent to the next member at the next 5th minute of the hour
-            checked_expiry = expired.replace(minute=5)
-            if expired.minute <= 5:
-                # When a coupon expired in the first 5 minutes of the hour, it is impossible to predict whether
-                # the coupon was sent to the next member in that same hour, or more than an hour later
-                # i.e. coupon expired at 15:03, it can both be sent to the next member at 15:05 or 16:05
-                checked_expiry2 = checked_expiry + dt.timedelta(hours=1)
-                return [checked_expiry, checked_expiry2]
-            else:
-                # If a coupon expired at 15:06, it is sent to the next member at 16:05
-                checked_expiry = checked_expiry + dt.timedelta(hours=1)
-                return [checked_expiry]
 
 
 

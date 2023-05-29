@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import datetime as dt
 from pprint import pprint
+from collections import Counter
 import matplotlib.pyplot as plt
 from dateutil.relativedelta import relativedelta
 from database.lib.tracktime import TrackTime, TrackReport
@@ -33,49 +34,42 @@ def main():
     result = query_db.retrieve_from_sql_db(db, 'filtered_coupons', 'filtered_issues', 'filtered_offers')
     filtered_coupons, filtered_issues, filtered_offers = result
 
-    # print_table_info(db)
+    result = query_db.retrieve_from_sql_db(db, 'member_category', 'member')
+    all_member_categories, all_members = result
 
-
-    query = "select * from member_category"
-    all_member_categories = pd.read_sql_query(query, db)
     query = "select * from member_family_member where type='child'"
     all_children = pd.read_sql_query(query, db)
     query = "select * from member_family_member where type='partner'"
     all_partners = pd.read_sql_query(query, db)
 
-    eligible_members_basic = get_eligible_members_basic(db, verbose=False)
 
     # query = "select * from member"
     # all_members = pd.read_sql_query(query, db)
     # plot_timeline_active_coupons(all_members,'onboarded_at')
     # plot_timeline_active_coupons(all_members,'receive_coupon_after')
 
-    print("Nr coupons to handle:",len(filtered_coupons))
+    TrackTime("get matching_context")
+    coupon = filtered_coupons.iloc[100,:].squeeze()
+    matching_context = filtered_offers[filtered_offers['id'] == coupon['offer_id']].squeeze()
+    timestamp = coupon['created_at']
 
-    for i, coupon in filtered_coupons.iterrows():
-        TrackTime("print")
-        if i%100 == 0:
-            print("\rHandling coupon nr %d (%.1f%%)"%(i,100*i/len(filtered_coupons)), end='')
 
-        # print(eligible_members_basic.shape)
-        TrackTime("get matching_context")
-        matching_context = filtered_offers[filtered_offers['id'] == coupon['offer_id']].squeeze()
-        timestamp = coupon['created_at']
+    TrackTime("eligible basic")
+    # email and phone number criteria
+    members_with_email    = all_members[~all_members['email'].isna()]
+    members_with_phone_nr = members_with_email[~members_with_email['mobile'].isna()]
+    # member must be active to be eligible
+    active_members = members_with_phone_nr[members_with_phone_nr['active'] == 1]
+    # Community criteria
+    eligible_members = active_members[active_members['community_id'] == COMMUNITY_ID]
 
-        eligible_members = eligible_members_basic
-        eligible_members = get_eligible_members_static(        eligible_members, matching_context, all_partners, all_member_categories, verbose=False)
-        eligible_members = get_eligible_members_time_dependent(eligible_members, matching_context, all_partners, all_children, timestamp, verbose=False)
-        # TrackTime('copy')
-        # eligible_members = copy.copy(eligible_members)
-        # print(eligible_members.shape)
-        # print("nr eligible_members:", len(eligible_members))
-        # TODO: eligibility based on coupon history
 
-        if i > 0:
-            break
+    TrackTime("get eligible members")
+    eligible_members = get_eligible_members_static(        eligible_members, matching_context, all_partners, all_member_categories, verbose=False)
+    eligible_members = get_eligible_members_time_dependent(eligible_members, matching_context, all_partners, all_children, timestamp, verbose=False)
+
 
     db.close()
-
     TrackReport()
 
 
@@ -91,7 +85,6 @@ def plot_timeline_active_coupons(df, col_name):
 
     res = timestamps.groupby(pd.cut(timestamps, intervals)).count()
     res.name = "nr_coupons_per_interval"
-    print(res)
     res = res.reset_index()
 
     interval_ends = list(map(lambda interval: interval.right, res[col_name]))
@@ -110,6 +103,114 @@ def datetime_range(start_date, end_date, delta):
     result.append(end_date)
     return result
 
+
+# Batch column definitions
+TIMESTAMP_COLUMN, COUPON_ID_COLUMN, ISSUE_ID_COLUMN, OFFER_ID_COLUMN = 0, 1, 3, 4
+# Historical context column definitions
+ACCEPTED_LAST_COUPON_AT, LET_LAST_COUPON_EXPIRE_AT, SET_OF_RECEIVED_OFFER_IDS = 0, 1, 2
+
+
+################# GET ALL ELIGIBLE MEMBERS FUNCTION ########################################
+
+def get_all_eligible_members(batch_to_send, members, supporting_info, historical_context):
+    batch_sent_at = batch_to_send[-1][TIMESTAMP_COLUMN]
+    offers, all_member_categories, all_children, all_partners = supporting_info
+
+    # Phone nr and email criteria already in effect
+    # member must be active to be eligible
+    members = members[members['active'] == 1]
+
+    offer_ids_to_send = Counter(list(map(lambda coupon_tuple: coupon_tuple[OFFER_ID_COLUMN], batch_to_send)))
+    offer_id_to_eligible_members = {}
+
+    for offer_id, nr_coupons_to_send in offer_ids_to_send.items():
+        offer = offers.loc[offer_id, :].squeeze()
+
+        TrackTime("get all eligible members static")
+        eligible_members = get_eligible_members_static(        members, offer, all_partners, all_member_categories, tracktime=False)
+
+        TrackTime("get all eligible members time")
+        eligible_members = get_eligible_members_time_dependent(eligible_members, offer, all_partners, all_children, batch_sent_at, tracktime=False)
+
+        TrackTime("get all eligible members history")
+        eligible_members = get_eligible_members_history(       eligible_members, offer_id, nr_coupons_to_send, historical_context, batch_sent_at)
+
+        TrackTime("Process eligible members")
+        # if len(eligible_members) == 0:
+        #     print("\nCoupons from offer_id %d have 0 eligible members"%offer_id)
+        offer_id_to_eligible_members[offer_id] = eligible_members['id'].values
+
+    return offer_id_to_eligible_members
+
+
+################# GET ALL ELIGIBLE MEMBERS BASED ON HISTORICALLY RECEIVED COUPONS ########################################
+
+def get_eligible_members_history(members, offer_id, nr_coupons_to_send, historical_context, batch_sent_at):
+    def let_coupon_expire_last_month(member_id):
+        let_last_coupon_expire_at = historical_context[member_id][LET_LAST_COUPON_EXPIRE_AT]
+        if let_last_coupon_expire_at is None:
+            return False
+        return batch_sent_at <= let_last_coupon_expire_at + dt.timedelta(days=30)
+        # return (batch_sent_at - let_last_coupon_expire_at).days <= 30
+        # return batch_sent_at - let_last_coupon_expire_at <= dt.timedelta(days=30)
+
+    # def accepted_coupon_last_month(member_id):
+    #     accepted_last_coupon_at = historical_context[member_id][ACCEPTED_LAST_COUPON_AT]
+    #     if accepted_last_coupon_at is None:
+    #         return False
+    #     return batch_sent_at <= accepted_last_coupon_at + dt.timedelta(days=30)
+        # return (batch_sent_at - accepted_last_coupon_at).days <= 30
+        # return batch_sent_at - accepted_last_coupon_at <= dt.timedelta(days=30)
+
+    def has_outstanding_coupon(member_id):
+        accepted_last_coupon_at = historical_context[member_id][ACCEPTED_LAST_COUPON_AT]
+        let_last_coupon_expire_at = historical_context[member_id][LET_LAST_COUPON_EXPIRE_AT]
+        dates = []
+        if accepted_last_coupon_at is not None:
+            dates.append(accepted_last_coupon_at)
+        if let_last_coupon_expire_at is not None:
+            dates.append(let_last_coupon_expire_at)
+        if len(dates) == 0:
+            return False
+        last_date = max(dates)
+        # If last_accepted or last_let_expire is in the future, the member is yet to respond to the outstanding coupon with that response
+        return batch_sent_at < last_date
+
+    TrackTime("already received offer")
+    members_who_already_received_this_offer = \
+        list(filter(lambda member_id: offer_id in historical_context[member_id][SET_OF_RECEIVED_OFFER_IDS], historical_context.keys()))
+    members = members[~members['id'].isin(members_who_already_received_this_offer)]
+
+    TrackTime("recently let coupon expire")
+    members_who_let_coupon_expire_in_last_month = \
+        list(filter(let_coupon_expire_last_month, historical_context.keys()))
+
+    members = members[~members['id'].isin(members_who_let_coupon_expire_in_last_month)]
+
+    if len(members) <= nr_coupons_to_send:
+        return members # No point in filtering as we already have fewer eligible members than coupons to send out
+
+    TrackTime("recently accepted coupon")
+    accept_dates = list(filter(lambda my_tuple: my_tuple[1] is not None, list(map(lambda member_id:(member_id, historical_context[member_id][ACCEPTED_LAST_COUPON_AT]) , historical_context.keys()))))
+    accept_dates = pd.DataFrame(accept_dates, columns=['member_id','accepted_last_coupon_at'])
+    accept_dates['recently_accepted'] = (batch_sent_at - accept_dates['accepted_last_coupon_at']) <= dt.timedelta(days=30)
+    members_who_accepted_coupon_in_last_month = accept_dates['member_id'][accept_dates['recently_accepted']].values
+
+    TrackTime("has outstanding coupon")
+    members_with_outstanding = \
+        list(filter(has_outstanding_coupon, historical_context.keys()))
+
+    TrackTime("check whether to filter")
+    potentially_ineligible_members = list(set(members_with_outstanding).union(set(members_who_accepted_coupon_in_last_month)))
+    filtered_members = members[~members['id'].isin(potentially_ineligible_members)]
+    if len(filtered_members) >= nr_coupons_to_send:
+        # Only filter if the filtering does not lead to a shortage of eligible members
+        return filtered_members
+    else:
+        return members
+
+
+################# GET ALL ELIGIBLE MEMBERS BASED ON TIME-DEPENDENT CRITERIA ########################################
 
 def child_age_to_stage(age):
     assert age >= 0
@@ -240,6 +341,8 @@ def get_eligible_members_time_dependent(eligible_members, matching_context, all_
     return eligible_members
 
 
+################# GET ALL ELIGIBLE MEMBERS BASED ON NON-TIME-DEPENDENT CRITERIA ########################################
+
 def get_eligible_members_static(eligible_members, matching_context, all_partners, all_member_categories, verbose=False, tracktime=False):
     """ Function that applies 'static' criteria.
     'static' in the sense that the result of the criteria should not change
@@ -275,6 +378,10 @@ def get_eligible_members_static(eligible_members, matching_context, all_partners
     if verbose: print("nr eligible_members category:", len(eligible_members))
 
     return eligible_members
+
+
+
+
 
 
 def get_eligible_members_basic(db, verbose=False):

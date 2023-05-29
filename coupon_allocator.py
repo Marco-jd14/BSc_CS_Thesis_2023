@@ -17,15 +17,13 @@ from collections import Counter
 import matplotlib.pyplot as plt
 from database.lib.tracktime import TrackTime, TrackReport
 
-np.random.seed(0)
-
+from get_eligible_members import get_all_eligible_members
 import database.connect_db as connect_db
 import database.query_db as query_db
 Event = query_db.Event
 
-from get_eligible_members import get_eligible_members_static, get_eligible_members_time_dependent
-from make_allocation_timeline import determine_coupon_checked_expiry_time
 
+np.random.seed(0)
 
 def main():
     TrackTime("Connect to db")
@@ -596,100 +594,66 @@ def filter_relevant_utilities(batch_to_send, members, utility_values, utility_in
     return rel_utility_values, (coupon_index_to_id, member_index_to_id)
 
 
-def get_all_eligible_members(batch_to_send, members, supporting_info, historical_context):
-    batch_sent_at = batch_to_send[-1][TIMESTAMP_COLUMN]
-    offers, all_member_categories, all_children, all_partners = supporting_info
+############# PROTOCOL FOR DETERMINING EXPIRY TIME OF COUPON #########################################
 
-    # Phone nr and email criteria already in effect
-    # member must be active to be eligible
-    members = members[members['active'] == 1]
+def determine_coupon_checked_expiry_time(created_at, accept_time, check=False):
+    """ Function that determines / predicts the time a coupon is sent
+    to the next member once it expires (i.e. the member has not replied)
+    """
 
-    offer_ids_to_send = Counter(list(map(lambda coupon_tuple: coupon_tuple[OFFER_ID_COLUMN], batch_to_send)))
-    offer_id_to_eligible_members = {}
+    # Check if timestamp is as expected
+    expired = created_at + dt.timedelta(days=accept_time)
 
-    for offer_id, nr_coupons_to_send in offer_ids_to_send.items():
-        offer = offers.loc[offer_id, :].squeeze()
+    # Before 14 dec 2021, whether coupons had expired was checked every morning at 10am
+    if expired.date() < dt.date(2021, 12, 14):
+        ten_am = dt.time(10, 0, 0)
+        if expired.time() <= ten_am:
+            checked_expiry = dt.datetime.combine(expired.date(), ten_am)
+        else:
+            # If the coupon expired after 10am, the coupons expiry was only noticed the next morning at 10am
+            checked_expiry = dt.datetime.combine(expired.date() + dt.timedelta(days=1), ten_am)
 
-        TrackTime("get all eligible members static")
-        eligible_members = get_eligible_members_static(        members, offer, all_partners, all_member_categories, tracktime=False)
+        # 29 okt 2021 was a day with (presumable) IT issues: ignore data
+        if check and checked_expiry.date() == dt.date(2021, 10, 29):
+            return None
 
-        TrackTime("get all eligible members time")
-        eligible_members = get_eligible_members_time_dependent(eligible_members, offer, all_partners, all_children, batch_sent_at, tracktime=False)
+        return [checked_expiry]
+        # checked_expiry2 = checked_expiry + dt.timedelta(days=1)
+        # return [checked_expiry, checked_expiry2]
 
-        TrackTime("get all eligible members history")
-        eligible_members = get_eligible_members_history(       eligible_members, offer_id, nr_coupons_to_send, historical_context, batch_sent_at)
-
-        TrackTime("Process eligible members")
-        # if len(eligible_members) == 0:
-        #     print("\nCoupons from offer_id %d have 0 eligible members"%offer_id)
-        offer_id_to_eligible_members[offer_id] = eligible_members['id'].values
-
-    return offer_id_to_eligible_members
-
-
-def get_eligible_members_history(members, offer_id, nr_coupons_to_send, historical_context, batch_sent_at, phase_one=True):
-    def let_coupon_expire_last_month(member_id):
-        let_last_coupon_expire_at = historical_context[member_id][LET_LAST_COUPON_EXPIRE_AT]
-        if let_last_coupon_expire_at is None:
-            return False
-        return batch_sent_at <= let_last_coupon_expire_at + dt.timedelta(days=30)
-        # return (batch_sent_at - let_last_coupon_expire_at).days <= 30
-        # return batch_sent_at - let_last_coupon_expire_at <= dt.timedelta(days=30)
-
-    def accepted_coupon_last_month(member_id):
-        accepted_last_coupon_at = historical_context[member_id][ACCEPTED_LAST_COUPON_AT]
-        if accepted_last_coupon_at is None:
-            return False
-        return batch_sent_at <= accepted_last_coupon_at + dt.timedelta(days=30)
-        # return (batch_sent_at - accepted_last_coupon_at).days <= 30
-        # return batch_sent_at - accepted_last_coupon_at <= dt.timedelta(days=30)
-
-    def has_outstanding_coupon(member_id):
-        accepted_last_coupon_at = historical_context[member_id][ACCEPTED_LAST_COUPON_AT]
-        let_last_coupon_expire_at = historical_context[member_id][LET_LAST_COUPON_EXPIRE_AT]
-        dates = []
-        if accepted_last_coupon_at is not None:
-            dates.append(accepted_last_coupon_at)
-        if let_last_coupon_expire_at is not None:
-            dates.append(let_last_coupon_expire_at)
-        if len(dates) == 0:
-            return False
-        last_date = max(dates)
-        # If last_accepted or last_let_expire is in the future, the member is yet to respond to the outstanding coupon with that response
-        return batch_sent_at < last_date
-
-    TrackTime("already received offer")
-    members_who_already_received_this_offer = \
-        list(filter(lambda member_id: offer_id in historical_context[member_id][SET_OF_RECEIVED_OFFER_IDS], historical_context.keys()))
-    members = members[~members['id'].isin(members_who_already_received_this_offer)]
-
-    TrackTime("recently let coupon expire")
-    members_who_let_coupon_expire_in_last_month = \
-        list(filter(let_coupon_expire_last_month, historical_context.keys()))
-
-    members = members[~members['id'].isin(members_who_let_coupon_expire_in_last_month)]
-
-    if len(members) <= nr_coupons_to_send:
-        return members # No point in filtering as we already have fewer eligible members than coupons to send out
-
-    TrackTime("recently accepted coupon")
-    accept_dates = list(filter(lambda my_tuple: my_tuple[1] is not None, list(map(lambda member_id:(member_id, historical_context[member_id][ACCEPTED_LAST_COUPON_AT]) , historical_context.keys()))))
-    accept_dates = pd.DataFrame(accept_dates, columns=['member_id','accepted_last_coupon_at'])
-    accept_dates['recently_accepted'] = (batch_sent_at - accept_dates['accepted_last_coupon_at']) <= dt.timedelta(days=30)
-    members_who_accepted_coupon_in_last_month = accept_dates['member_id'][accept_dates['recently_accepted']].values
-
-    TrackTime("has outstanding coupon")
-    members_with_outstanding = \
-        list(filter(has_outstanding_coupon, historical_context.keys()))
-
-    TrackTime("check whether to filter")
-    potentially_ineligible_members = list(set(members_with_outstanding).union(set(members_who_accepted_coupon_in_last_month)))
-    filtered_members = members[~members['id'].isin(potentially_ineligible_members)]
-    if len(filtered_members) >= nr_coupons_to_send:
-        # Only filter if the filtering does not lead to a shortage of eligible members
-        return filtered_members
+    # After 14 dec 2021, whether coupons had expired was checked every hour, except between 8pm and 8am at night
     else:
-        return members
+        eight_pm = dt.time(20, 0, 0)
+        eight_am = dt.time(8, 0, 0)
+        if expired.time() > eight_pm:
+            # If the coupon expired after 20:00, it is sent to the next person at 08:05 the next morning
+            checked_expiry = (expired + dt.timedelta(days=1)).replace(hour=8,minute=5)
+            return [checked_expiry]
+            # checked_expiry2 = expired if expired.time() < dt.time(20, 5, 0) else checked_expiry
+            # return [checked_expiry, checked_expiry2]
+
+        elif expired.time() < eight_am:
+            # If the coupon expired before 08:00, it is sent to the next person at 08:05 the same day
+            checked_expiry = expired.replace(hour=8,minute=5)
+            return [checked_expiry]
+
+        else:
+            # 28 sept 2022 was a day with (presumably) IT issues: ignore data
+            if check and expired.date() == dt.date(2022, 9, 28):
+                return None
+
+            # If a coupon expired, it is usually sent to the next member at the next 5th minute of the hour
+            checked_expiry = expired.replace(minute=5)
+            if expired.minute <= 5:
+                # When a coupon expired in the first 5 minutes of the hour, it is impossible to predict whether
+                # the coupon was sent to the next member in that same hour, or more than an hour later
+                # i.e. coupon expired at 15:03, it can both be sent to the next member at 15:05 or 16:05
+                checked_expiry2 = checked_expiry + dt.timedelta(hours=1)
+                return [checked_expiry, checked_expiry2]
+            else:
+                # If a coupon expired at 15:06, it is sent to the next member at 16:05
+                checked_expiry = checked_expiry + dt.timedelta(hours=1)
+                return [checked_expiry]
 
 
 
