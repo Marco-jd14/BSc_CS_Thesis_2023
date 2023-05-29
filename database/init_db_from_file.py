@@ -25,11 +25,12 @@ def main():
     print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
 
     # Parse the SQL file, then execute the commands in it
-    execute_commands_from_sql_file(db)
-
-    # Close the connection to the database
-    db.close()
-    conn.close()
+    try:
+        execute_commands_from_sql_file(db)
+    finally:
+        # Close the connection to the database
+        db.close()
+        conn.close()
 
 
 def execute_commands_from_sql_file(db):
@@ -126,7 +127,7 @@ def execute_create_table_commands(db, create_table_commands, verbose=False):
 
             # Try to execute the command
             try:
-                db.execute(command)
+                db.execute(sqlalchemy.text(command))
                 # Upon success, add the command to the execution_order list
                 execution_order_of_table_creation_commands.append(command)
             except sqlalchemy.exc.SQLAlchemyError as e:
@@ -209,16 +210,20 @@ def execute_commands(db, commands):
         # Try to execute the command
         success = False
         try:
-            db.execute(command)
+            # Escape any inline string semicolons to prevent them from being interpreted as bindparameter
+            for param in sqlalchemy.text(command).compile().params.keys():
+                command = command.replace(":%s"%param, r"\:%s"%param)
+            db.execute(sqlalchemy.text(command))
             success = True
         except Exception as e:
             print("\nCommand could not be executed successfully")
             try:  print(e.errno, e.msg)
-            except: print(e)
+            except: print(str(e)[:1000])
 
         # Stop if an error was encountered
         if not success:
             print("Could not execute all commands successfully")
+            db.close()
             sys.exit(0)
 
 

@@ -8,6 +8,7 @@ Created on Mon May  1 11:47:01 2023
 import sys
 import copy
 import enum
+import sqlalchemy
 import numpy as np
 import pandas as pd
 import datetime as dt
@@ -573,11 +574,11 @@ def plot_timeline_active_coupons(df):
 
 def print_table_info(db):
     tables = ['filtered_coupons', 'filtered_issues', 'offer', 'member']
-    # all_tables = pd.read_sql_query("show tables", db).squeeze().values
+    # all_tables = pd.read_sql_query(sqlalchemy.text("show tables"), db).squeeze().values
 
     for table_name in tables:
         print("\n\nTABLE", table_name)
-        query = "SELECT * FROM %s"%table_name
+        query = sqlalchemy.text("SELECT * FROM %s"%table_name)
         df = pd.read_sql_query(query, db)
 
         for col in df.columns:

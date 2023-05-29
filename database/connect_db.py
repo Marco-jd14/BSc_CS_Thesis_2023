@@ -63,10 +63,10 @@ def establish_database_connection(connection, overwrite=False):
     if overwrite:
         # Delete the database if it already exists
         print("Deleting existing database %s"%DATABASE_NAME)
-        connection.execute('drop database if exists %s'%DATABASE_NAME)
+        connection.execute(sqlalchemy.text('drop database if exists %s'%DATABASE_NAME))
 
     # Create database if it does not exist
-    connection.execute('create database if not exists %s'%DATABASE_NAME)
+    connection.execute(sqlalchemy.text('create database if not exists %s'%DATABASE_NAME))
     connection.close()
 
     # Establish connection to a provided DATABASE_NAME
@@ -88,13 +88,13 @@ if __name__ == '__main__':
     print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
 
     query = "show tables;"
-    result = db.execute(query)
+    result = db.execute(sqlalchemy.text(query))
     df = pd.DataFrame(result.fetchall())
     print(df)
 
     # The following is equivalent
     query = "show tables;"
-    df = pd.read_sql_query(query, db)
+    df = pd.read_sql_query(sqlalchemy.text(query), db)
     print(df)
 
     # Close connection to the database when you're done with it

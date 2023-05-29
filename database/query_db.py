@@ -6,6 +6,7 @@ Created on Sat May 13 11:25:27 2023
 """
 import enum
 import pandas as pd
+import sqlalchemy
 
 
 # Relevant events according to the coupon lifecycle
@@ -26,7 +27,7 @@ def retrieve_from_sql_db(db, *table_names):
     for table_name in table_names:
         print("Retrieving table '%s' from database"%table_name)
 
-        query = "select * from %s"%table_name
+        query = sqlalchemy.text("select * from %s"%table_name)
         table = pd.read_sql_query(query, db)
 
         # Translate str back to Event objects for easy comparison later on
@@ -49,7 +50,7 @@ def save_df_to_sql(db, name_to_table_mapping):
         if 'member_response' in table.columns:
            table['member_response'] = table['member_response'].apply(lambda event: str(event).replace('Event.',''))
 
-        db.execute("DROP TABLE IF EXISTS `%s`;"%table_name)
+        db.execute(sqlalchemy.text("DROP TABLE IF EXISTS `%s`;"%table_name))
         table.to_sql(table_name, db, index=False)
 
 
@@ -72,8 +73,8 @@ if __name__ == '__main__':
     save_df_to_sql(db, name_to_table_mapping)
 
     # Leaving the database in the same state as it was
-    db.execute("DROP TABLE `my_new_table_name1`;")
-    db.execute("DROP TABLE `my_new_table_name2`;")
+    db.execute(sqlalchemy.text("DROP TABLE `my_new_table_name1`;"))
+    db.execute(sqlalchemy.text("DROP TABLE `my_new_table_name2`;"))
 
     # Close connection to the database when you're done with it
     db.close()
