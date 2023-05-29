@@ -17,12 +17,12 @@ from collections import Counter
 import matplotlib.pyplot as plt
 from database.lib.tracktime import TrackTime, TrackReport
 
-from allocator_algorithms import greedy
 from get_eligible_members import get_all_eligible_members
 import database.connect_db as connect_db
 import database.query_db as query_db
 Event = query_db.Event
 
+from allocator_algorithms import greedy
 
 np.random.seed(0)
 
@@ -32,11 +32,11 @@ def main():
     db   = connect_db.establish_database_connection(conn)
     print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
 
-    BATCH_SIZE = 1
+    BATCH_SIZE = 5
 
     try:
         preparation = prepare_simulation_data(db)
-        events_df = simulate_coupon_allocations(BATCH_SIZE, *preparation)
+        events_df = simulate_coupon_allocations(BATCH_SIZE, greedy, *preparation)
 
         TrackTime("Export")
         export_path = './timelines/events_list_%s.xlsx'%(str(dt.datetime.now().strftime("%Y.%m.%d-%H.%M.%S")))
@@ -62,7 +62,7 @@ ACCEPTED_LAST_COUPON_AT, LET_LAST_COUPON_EXPIRE_AT, SET_OF_RECEIVED_OFFER_IDS = 
 
 
 # def allocate_resources(resources_stream, resources_properties, agents, utility_values, utility_indices):
-def simulate_coupon_allocations(batch_size, issues, members, utility_values, utility_indices, supporting_info=None, verbose=False):
+def simulate_coupon_allocations(batch_size, get_allocation, issues, members, utility_values, utility_indices, supporting_info=None, verbose=False):
     # members = agents
     # offers = unique resources
     # issues = stream of resources
@@ -112,7 +112,7 @@ def simulate_coupon_allocations(batch_size, issues, members, utility_values, uti
                 print("\rissue nr %d (%.1f%%)     batch nr %d"%(issue_counter,100*issue_counter/len(issues), batch_counter), end='')
 
             # Generate events for the next batch
-            result = send_out_new_batch(issues, members, utility_values, utility_indices, supporting_info,
+            result = send_out_new_batch(get_allocation, issues, members, utility_values, utility_indices, supporting_info,
                                         historical_context, events_list, unsorted_queue_of_coupons, batch_size,
                                         prev_batch_unsent_coupons, max_existing_coupon_id, verbose)
 
@@ -125,13 +125,14 @@ def simulate_coupon_allocations(batch_size, issues, members, utility_values, uti
     TrackTime("Make events df")
     events_df = pd.DataFrame(events_list, columns=events_df.columns)
     events_df = events_df.sort_values(by=['at','coupon_follow_id','event']).reset_index(drop=True)
+    events_df['at'] = events_df['at'].apply(lambda time: time.replace(microsecond=0))
     return events_df
 
 
 
-def send_out_new_batch(issues, members, utility_values, utility_indices, supporting_info, historical_context,
-                       events_list, unsorted_queue_of_coupons, batch_size, prev_batch_unsent_coupons, 
-                       max_existing_coupon_id, verbose):
+def send_out_new_batch(get_allocation, issues, members, utility_values, utility_indices, supporting_info,
+                       historical_context, events_list, unsorted_queue_of_coupons, batch_size,
+                       prev_batch_unsent_coupons, max_existing_coupon_id, verbose):
 
     batch_sent_at = unsorted_queue_of_coupons[batch_size-1][TIMESTAMP_COLUMN]
 
@@ -177,13 +178,13 @@ def send_out_new_batch(issues, members, utility_values, utility_indices, support
     # Zero eligible members
     if len(member_index_to_id) == 0:
         unsent_coupons = batch_to_send
-        print("\nCould not find any eligible members to send the batch to")
+        if verbose: print("\nCould not find any eligible members to send the batch to")
         return unsorted_queue_of_coupons, events_list, historical_context, unsent_coupons, max_existing_coupon_id
 
 
     TrackTime("Determining optimal allocation")
     # Determine allocation of coupons based on utilities
-    X_a_r = greedy(batch_utility, verbose)
+    X_a_r = get_allocation(batch_utility, verbose)
     member_indices, coupon_indices = np.nonzero(X_a_r)
     assert len(set(member_indices)) == len(member_indices), "One member got more than one coupons?"
 
