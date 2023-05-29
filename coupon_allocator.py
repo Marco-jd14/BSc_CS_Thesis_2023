@@ -21,7 +21,7 @@ np.random.seed(0)
 
 import database.connect_db as connect_db
 import database.query_db as query_db
-# Event = query_db.Event
+Event = query_db.Event
 
 from get_eligible_members import get_eligible_members_static, get_eligible_members_time_dependent
 from make_allocation_timeline import determine_coupon_checked_expiry_time
@@ -131,17 +131,6 @@ def prepare_allocator(db):
     return filtered_issues, all_members, utility_values, utility_indices, supporting_info
 
 
-# Relevant events according to the coupon lifecycle
-class Event(enum.Enum):
-    member_accepted     = 0
-    member_declined     = 1
-    member_let_expire   = 2 # i.e. after 3 days
-    coupon_available    = 3
-    coupon_sent         = 4
-    coupon_expired      = 5 # i.e. after 1 month
-
-    def __lt__(self, other):
-        self.value < other.value
 
 
 def release_new_issue(issue, max_existing_coupon_id, max_existing_coupon_follow_id, verbose):
@@ -261,6 +250,7 @@ def send_out_chosen_coupons(member_indices, coupon_indices, coupon_index_to_id, 
 
 
 def check_expiry_unsent_coupons(batch_sent_at, issues, prev_batch_unsent_coupons):
+    TrackTime("Process prev batch unsent coupons")
     unsent_coupons_to_retry, unsent_coupons_now_expired = [], []
 
     for coupon in prev_batch_unsent_coupons:
@@ -340,9 +330,6 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
         if issue_counter%20 == 0:
             print("\rissue nr %d (%.1f%%)     batch nr %d"%(issue_counter,100*issue_counter/len(issues), batch_counter), end='')
 
-        # if issue_counter > 1000:
-        #     break
-
         # Release the new issue
         max_coupon_ids, coupon_lists = release_new_issue(issue, max_existing_coupon_id,
                                                          max_existing_coupon_follow_id, verbose)
@@ -356,9 +343,9 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
 
         # Send out the next batch while we have enough coupons
         while is_batch_ready_to_be_sent(unsorted_queue_of_coupons, BATCH_SIZE, issue_counter, issues):
+            batch_counter += 1
             if batch_counter%10 == 0:
                 print("\rissue nr %d (%.1f%%)     batch nr %d"%(issue_counter,100*issue_counter/len(issues), batch_counter), end='')
-            batch_counter += 1
 
             result = send_out_new_batch(issues, members, utility_values, utility_indices, supporting_info,
                                         historical_context, events_list, unsorted_queue_of_coupons, BATCH_SIZE,
@@ -375,7 +362,8 @@ def allocate_coupons(issues, members, utility_values, utility_indices, supportin
     return events_df
 
 
-# multiset_unsent_coupons = Counter()
+multiset_unsent_coupons = Counter()
+coupons_to_check = []
 
 def send_out_new_batch(issues, members, utility_values, utility_indices, supporting_info, historical_context,
                        events_list, unsorted_queue_of_coupons, BATCH_SIZE, prev_batch_unsent_coupons, 
@@ -383,7 +371,7 @@ def send_out_new_batch(issues, members, utility_values, utility_indices, support
 
     batch_sent_at = unsorted_queue_of_coupons[BATCH_SIZE-1][TIMESTAMP_COLUMN]
 
-    TrackTime("Process prev batch unsent coupons")
+    # Check if we can try to resend coupons, or if they have already expired
     unsent_coupons_to_retry, unsent_coupons_now_expired = check_expiry_unsent_coupons(batch_sent_at, issues,
                                                                                       prev_batch_unsent_coupons)
 
@@ -417,8 +405,7 @@ def send_out_new_batch(issues, members, utility_values, utility_indices, support
     #     else:
     #         assert batch_sent_at < issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at'], "Trying to send out a coupon at %s which already expired at %s"%(batch_sent_at, issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at'])
 
-
-    TrackTime("Filtering relevant utilies")
+    # Prepare the matrix of utilities for the allocation-algorithm(s)
     batch_utility, batch_indices = filter_relevant_utilities(batch_to_send, members, utility_values, utility_indices, 
                                                              supporting_info, historical_context)
     coupon_index_to_id, member_index_to_id = batch_indices
@@ -492,15 +479,22 @@ def send_out_new_batch(issues, members, utility_values, utility_indices, support
             historical_context[member_id][SET_OF_RECEIVED_OFFER_IDS].add(not_accepted_coupon[1+OFFER_ID_COLUMN])
 
 
-    # unsent_coupon_ids = list(map(lambda unsent_coupon: unsent_coupon[COUPON_ID_COLUMN], unsent_coupons))
-    # multiset_unsent_coupons.update(unsent_coupon_ids)
+    global coupons_to_check
+    
+    unsent_coupon_ids = list(map(lambda unsent_coupon: unsent_coupon[COUPON_ID_COLUMN], unsent_coupons))
+    multiset_unsent_coupons.update(unsent_coupon_ids)
 
-    # coupon_ids_unsent_more_than_5 = list(filter(lambda coupon_id: multiset_unsent_coupons[coupon_id] >= 5, unsent_coupon_ids))
-    # sent_coupon_ids = list(map(lambda sent_coupon: sent_coupon[COUPON_ID_COLUMN+1], sent_coupons))
-    # for coupon_id in coupon_ids_unsent_more_than_5:
-    #     if coupon_id in sent_coupon_ids:
-    #         print("Finally sent out a coupon after %d tries"%(multiset_unsent_coupons[coupon_id]))
+    coupon_ids_unsent_more_than_5 = list(filter(lambda coupon_id: multiset_unsent_coupons[coupon_id] >= 5, unsent_coupon_ids))
+    sent_coupon_ids = list(map(lambda sent_coupon: sent_coupon[COUPON_ID_COLUMN+1], sent_coupons))
+    for coupon_id in coupon_ids_unsent_more_than_5:
+        if coupon_id in coupons_to_check:
+            if coupon_id in sent_coupon_ids:
+                print("\nFinally sent out a coupon after %d tries"%(multiset_unsent_coupons[coupon_id]))
+            # else:
+                # print("\n", coupon_id in unsent_coupon_ids)
+                
 
+    coupons_to_check = unsent_coupon_ids
 
     if len(unsent_coupons) == len(batch_to_send):
         print("\nDid not allocate any coupons from last batch")
@@ -513,8 +507,8 @@ def send_out_new_batch(issues, members, utility_values, utility_indices, support
 
 def greedy(Uar, verbose=False):
     nr_A, nr_R = Uar.shape
-    if not nr_A >= nr_R:
-        if verbose: print("\nLess eligible members than resources: %d !>= %d"%(nr_A,nr_R))
+    if nr_A < nr_R:
+        if verbose: print("\nLess eligible members than resources: %d < %d"%(nr_A,nr_R))
     Xar = np.zeros_like(Uar, dtype=int)
 
     nr_non_eligible_members = np.sum(Uar < 0)
@@ -551,6 +545,7 @@ def greedy(Uar, verbose=False):
 
 
 def filter_relevant_utilities(batch_to_send, members, utility_values, utility_indices, supporting_info, historical_context):
+    TrackTime("Filtering relevant utilies")
     member_id_to_index, offer_id_to_index = utility_indices
 
     # Decrease nr columns of utility_values based on relevant offers
@@ -618,14 +613,11 @@ def get_all_eligible_members(batch_to_send, members, supporting_info, historical
         TrackTime("get all eligible members static")
         eligible_members = get_eligible_members_static(        members, offer, all_partners, all_member_categories, tracktime=False)
 
-        TrackTime("get all eligible members history")
-        eligible_members = get_eligible_members_history(       eligible_members, offer_id, nr_coupons_to_send, historical_context, batch_sent_at, phase_one=True)
-
         TrackTime("get all eligible members time")
         eligible_members = get_eligible_members_time_dependent(eligible_members, offer, all_partners, all_children, batch_sent_at, tracktime=False)
 
         TrackTime("get all eligible members history")
-        eligible_members = get_eligible_members_history(       eligible_members, offer_id, nr_coupons_to_send, historical_context, batch_sent_at, phase_one=False)
+        eligible_members = get_eligible_members_history(       eligible_members, offer_id, nr_coupons_to_send, historical_context, batch_sent_at)
 
         TrackTime("Process eligible members")
         # if len(eligible_members) == 0:
@@ -640,14 +632,16 @@ def get_eligible_members_history(members, offer_id, nr_coupons_to_send, historic
         let_last_coupon_expire_at = historical_context[member_id][LET_LAST_COUPON_EXPIRE_AT]
         if let_last_coupon_expire_at is None:
             return False
-        return (batch_sent_at - let_last_coupon_expire_at).days <= 30
-        # return batch_sent_at - let_last_coupon_expire_at < dt.timedelta(days=30)
+        return batch_sent_at <= let_last_coupon_expire_at + dt.timedelta(days=30)
+        # return (batch_sent_at - let_last_coupon_expire_at).days <= 30
+        # return batch_sent_at - let_last_coupon_expire_at <= dt.timedelta(days=30)
 
     def accepted_coupon_last_month(member_id):
         accepted_last_coupon_at = historical_context[member_id][ACCEPTED_LAST_COUPON_AT]
         if accepted_last_coupon_at is None:
             return False
-        return (batch_sent_at - accepted_last_coupon_at).days <= 30
+        return batch_sent_at <= accepted_last_coupon_at + dt.timedelta(days=30)
+        # return (batch_sent_at - accepted_last_coupon_at).days <= 30
         # return batch_sent_at - accepted_last_coupon_at <= dt.timedelta(days=30)
 
     def has_outstanding_coupon(member_id):
@@ -664,44 +658,39 @@ def get_eligible_members_history(members, offer_id, nr_coupons_to_send, historic
         # If last_accepted or last_let_expire is in the future, the member is yet to respond to the outstanding coupon with that response
         return batch_sent_at < last_date
 
-    # ACCEPTED_LAST_COUPON_AT, LET_LAST_COUPON_EXPIRE_AT, SET_OF_RECEIVED_OFFER_IDS
-    # TODO: get eligible_members based on historically received coupons / pending coupons
-    if phase_one:
-        TrackTime("already received offer")
-        members_who_already_received_this_offer = \
-            list(filter(lambda member_id: offer_id in historical_context[member_id][SET_OF_RECEIVED_OFFER_IDS], historical_context.keys()))
-        members = members[~members['id'].isin(members_who_already_received_this_offer)]
+    TrackTime("already received offer")
+    members_who_already_received_this_offer = \
+        list(filter(lambda member_id: offer_id in historical_context[member_id][SET_OF_RECEIVED_OFFER_IDS], historical_context.keys()))
+    members = members[~members['id'].isin(members_who_already_received_this_offer)]
 
-        TrackTime("recently let coupon expire")
-        members_who_let_coupon_expire_in_last_month = \
-            list(filter(let_coupon_expire_last_month, historical_context.keys()))
-        members = members[~members['id'].isin(members_who_let_coupon_expire_in_last_month)]
+    TrackTime("recently let coupon expire")
+    members_who_let_coupon_expire_in_last_month = \
+        list(filter(let_coupon_expire_last_month, historical_context.keys()))
+
+    members = members[~members['id'].isin(members_who_let_coupon_expire_in_last_month)]
+
+    if len(members) <= nr_coupons_to_send:
+        return members # No point in filtering as we already have fewer eligible members than coupons to send out
+
+    TrackTime("recently accepted coupon")
+    accept_dates = list(filter(lambda my_tuple: my_tuple[1] is not None, list(map(lambda member_id:(member_id, historical_context[member_id][ACCEPTED_LAST_COUPON_AT]) , historical_context.keys()))))
+    accept_dates = pd.DataFrame(accept_dates, columns=['member_id','accepted_last_coupon_at'])
+    accept_dates['recently_accepted'] = (batch_sent_at - accept_dates['accepted_last_coupon_at']) <= dt.timedelta(days=30)
+    members_who_accepted_coupon_in_last_month = accept_dates['member_id'][accept_dates['recently_accepted']].values
+
+    TrackTime("has outstanding coupon")
+    members_with_outstanding = \
+        list(filter(has_outstanding_coupon, historical_context.keys()))
+
+    TrackTime("check whether to filter")
+    potentially_ineligible_members = list(set(members_with_outstanding).union(set(members_who_accepted_coupon_in_last_month)))
+    filtered_members = members[~members['id'].isin(potentially_ineligible_members)]
+    if len(filtered_members) >= nr_coupons_to_send:
+        # Only filter if the filtering does not lead to a shortage of eligible members
+        return filtered_members
+    else:
         return members
 
-    else:
-        if len(members) <= nr_coupons_to_send:
-            # print("No point in filtering, as %d is already <= %d"%(len(members), nr_coupons_to_send))
-            return members
-
-        TrackTime("recently accepted coupon")
-        # members_to_filter = list(filter(lambda member_id: historical_context[member_id][ACCEPTED_LAST_COUPON_AT] is not None, historical_context.keys()))
-        members_who_accepted_coupon_in_last_month = \
-            list(filter(accepted_coupon_last_month, historical_context.keys()))
-
-        TrackTime("has outstanding coupon")
-        members_with_outstanding = \
-            list(filter(has_outstanding_coupon, historical_context.keys()))
-
-        TrackTime("check whether to filter")
-        potentially_ineligible_members = list(set(members_with_outstanding).union(set(members_who_accepted_coupon_in_last_month)))
-        filtered_members = members[~members['id'].isin(potentially_ineligible_members)]
-        if len(filtered_members) >= nr_coupons_to_send:
-            return filtered_members
-        else:
-            # print("Too little eligible members, otherwise %d --> %d < %d"%(len(members), len(filtered_members), nr_coupons_to_send))
-            return members
-    
-    # print("filtered out %d members based on historical context"%(len(members_who_already_received_this_offer) + len(members_who_let_coupon_expire_in_last_month)))
 
 
 if __name__ == '__main__':
