@@ -104,15 +104,12 @@ def datetime_range(start_date, end_date, delta):
     return result
 
 
-# Batch column definitions
-TIMESTAMP_COLUMN, COUPON_ID_COLUMN, ISSUE_ID_COLUMN, OFFER_ID_COLUMN = 0, 1, 3, 4
-# Historical context column definitions
-ACCEPTED_LAST_COUPON_AT, LET_LAST_COUPON_EXPIRE_AT, SET_OF_RECEIVED_OFFER_IDS = 0, 1, 2
-
-
 ################# GET ALL ELIGIBLE MEMBERS FUNCTION ########################################
 
 def get_all_eligible_members(batch_to_send, members, supporting_info, historical_context):
+    # Batch column definitions
+    from coupon_stream_simulator import TIMESTAMP_COLUMN, OFFER_ID_COLUMN
+
     batch_sent_at = batch_to_send[-1][TIMESTAMP_COLUMN]
     offers, all_member_categories, all_children, all_partners = supporting_info
 
@@ -146,6 +143,9 @@ def get_all_eligible_members(batch_to_send, members, supporting_info, historical
 ################# GET ALL ELIGIBLE MEMBERS BASED ON HISTORICALLY RECEIVED COUPONS ########################################
 
 def get_eligible_members_history(members, offer_id, nr_coupons_to_send, historical_context, batch_sent_at):
+    # Historical context column definitions
+    from coupon_stream_simulator import ACCEPTED_LAST_COUPON_AT, LET_LAST_COUPON_EXPIRE_AT, SET_OF_RECEIVED_OFFER_IDS
+
     def let_coupon_expire_last_month(member_id):
         let_last_coupon_expire_at = historical_context[member_id][LET_LAST_COUPON_EXPIRE_AT]
         if let_last_coupon_expire_at is None:

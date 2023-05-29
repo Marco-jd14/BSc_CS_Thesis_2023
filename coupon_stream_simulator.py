@@ -32,9 +32,11 @@ def main():
     db   = connect_db.establish_database_connection(conn)
     print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
 
+    BATCH_SIZE = 1
+
     try:
         preparation = prepare_simulation_data(db)
-        events_df = simulate_coupon_allocations(*preparation)
+        events_df = simulate_coupon_allocations(BATCH_SIZE, *preparation)
 
         TrackTime("Export")
         export_path = './timelines/events_list_%s.xlsx'%(str(dt.datetime.now().strftime("%Y.%m.%d-%H.%M.%S")))
@@ -53,99 +55,26 @@ def main():
 
 
 
-
-def prepare_simulation_data(db):
-    TrackTime("Retrieve from db")
-    result = query_db.retrieve_from_sql_db(db, 'filtered_issues', 'filtered_offers', 'member')
-    filtered_issues, filtered_offers, all_members = result
-
-    TrackTime("Prepare for allocation")
-    # No functionality to incorporate 'aborted_at' has been made (so far)
-    assert np.all(filtered_issues['aborted_at'].isna())
-
-    # No functionality to incorporate 'reissue_unused_participants_of_coupons_enabled' has been made (so far)
-    # print("%d out of %d offers enabled reissued"%(np.sum(filtered_offers['reissue_unused_participants_of_coupons_enabled']), len(filtered_offers)))
-
-    relevant_issue_columns = ['id','offer_id','sent_at','amount','expires_at']
-    filtered_issues = filtered_issues[relevant_issue_columns]
-    filtered_issues = filtered_issues.sort_values(by='sent_at').reset_index(drop=True)
-
-    # # res = filtered_issues
-    # res = filtered_issues[['offer_id','sent_at','expires_at','amount','total_issued','nr_accepted']][filtered_issues['sent_at'] == filtered_issues['expires_at']]
-    # print(res)
-    # print(np.all(res['total_issued'] == 1))
-    # print(np.all(res['amount'] == 1))
-    # print(np.sum(res['nr_accepted']))
-
-    # to_join = filtered_offers[['id','redeem_till','redeem_type']]
-    # res = pd.merge(res, to_join, left_on='offer_id', right_on='id')
-    # print(res['redeem_till'].unique())
-    # print(res['redeem_type'].unique())
-    # print(res.groupby('redeem_type').aggregate(count=('id','count')))
-    # print(res.groupby('redeem_till').aggregate(count=('id','count')))
-    
-    # # print(filtered_issues[['sent_at','expires_at']][filtered_issues['sent_at'] == filtered_issues['expires_at']])
-    # sys.exit()
-
-    relevant_offer_columns = ['id', 'category_id', 'accept_time', 'member_criteria_gender', 'member_criteria_min_age',
-                              'member_criteria_max_age', 'family_criteria_min_count', 'family_criteria_max_count',
-                              'family_criteria_child_age_range_min', 'family_criteria_child_age_range_max',
-                              'family_criteria_child_stages_child_stages', 'family_criteria_child_gender',
-                              'family_criteria_is_single', 'family_criteria_has_children']
-    filtered_offers = copy.copy(filtered_offers[relevant_offer_columns])
-
-    # TODO: 'receive_coupon_after', 'deactivated_at', 'archived_at', 'onboarded_at', 'created_at'
-    relevant_member_columns = ['id', 'active', 'member_state', 'email', 'mobile', 'date_of_birth', 'gender']
-    all_members = all_members[relevant_member_columns]
-
-    # email and phone number criteria
-    all_members = all_members[~all_members['email'].isna()]
-    all_members = all_members[~all_members['mobile'].isna()]
-
-    # Generate Utilities, the fit of a member to an offer
-    nr_agents = len(all_members)
-    nr_unique_resources = len(filtered_offers)
-    utility_values = np.random.uniform(0,0.7,size=(nr_agents, nr_unique_resources))
-
-    # Creates a dictionary from 'id' column to index of dataframe
-    member_id_to_index = all_members['id'].reset_index().set_index('id').to_dict()['index']
-    offer_id_to_index = filtered_offers['id'].reset_index().set_index('id').to_dict()['index']
-    utility_indices = (member_id_to_index, offer_id_to_index)
-
-    # Put offer_id as index of the dataframe (instead of 0 until len(df))
-    filtered_offers['id_index'] = filtered_offers['id']
-    filtered_offers = filtered_offers.set_index('id_index')
-    # Put issue_id as index of the dataframe (instead of 0 until len(df))
-    filtered_issues['id_index'] = filtered_issues['id']
-    filtered_issues = filtered_issues.set_index('id_index')
-
-    query = "select * from member_category"
-    all_member_categories = pd.read_sql_query(query, db)
-    query = "select * from member_family_member where type='child'"
-    all_children = pd.read_sql_query(query, db)
-    query = "select * from member_family_member where type='partner'"
-    all_partners = pd.read_sql_query(query, db)
-    supporting_info = (filtered_offers, all_member_categories, all_children, all_partners)
-
-    return filtered_issues, all_members, utility_values, utility_indices, supporting_info
-
+# Batch column definitions
+TIMESTAMP_COLUMN, COUPON_ID_COLUMN, ISSUE_ID_COLUMN, OFFER_ID_COLUMN = 0, 1, 3, 4
+# Historical context column definitions
+ACCEPTED_LAST_COUPON_AT, LET_LAST_COUPON_EXPIRE_AT, SET_OF_RECEIVED_OFFER_IDS = 0, 1, 2
 
 
 # def allocate_resources(resources_stream, resources_properties, agents, utility_values, utility_indices):
-def simulate_coupon_allocations(issues, members, utility_values, utility_indices, supporting_info=None, verbose=False):
+def simulate_coupon_allocations(batch_size, issues, members, utility_values, utility_indices, supporting_info=None, verbose=False):
     # members = agents
     # offers = unique resources
     # issues = stream of resources
-    TrackTime("Allocate")
-    print(utility_values.shape)
-
     # The supporting info could be re-retrieved from the database constantly, but doing it only once improves performance
 
-    BATCH_SIZE = 5
+    TrackTime("Allocate")
 
+    # To be able to easily generate new unique coupon (follow) ids
     max_existing_coupon_id = -1
     max_existing_coupon_follow_id = -1
 
+    # The list / df of events which will be exported in the end
     events_list = []
     events_df = pd.DataFrame(columns=['event','at','coupon_id','coupon_follow_id','issue_id','offer_id','member_id'])
 
@@ -153,14 +82,10 @@ def simulate_coupon_allocations(issues, members, utility_values, utility_indices
     unsorted_queue_of_coupons = []
     prev_batch_unsent_coupons = []
 
-    global TIMESTAMP_COLUMN, COUPON_ID_COLUMN, ISSUE_ID_COLUMN, OFFER_ID_COLUMN
-    TIMESTAMP_COLUMN, COUPON_ID_COLUMN, ISSUE_ID_COLUMN, OFFER_ID_COLUMN = 0, 1, 3, 4
-
-    # Define historical context and the 4 indices of a value based on member-id (key)
+    # Initialize historical context and the 3 values based on member-id (key)
     historical_context = {member_id: [None, None, set()] for member_id in members['id'].values}
 
-    global ACCEPTED_LAST_COUPON_AT, LET_LAST_COUPON_EXPIRE_AT, SET_OF_RECEIVED_OFFER_IDS
-    ACCEPTED_LAST_COUPON_AT, LET_LAST_COUPON_EXPIRE_AT, SET_OF_RECEIVED_OFFER_IDS = 0, 1, 2
+    print("\nStarting simulation\n")
 
     # Loop over all issues to release
     batch_counter = 0
@@ -181,13 +106,14 @@ def simulate_coupon_allocations(issues, members, utility_values, utility_indices
         events_list.extend(came_available_coupons)
 
         # Send out the next batch while we have enough coupons
-        while is_batch_ready_to_be_sent(unsorted_queue_of_coupons, BATCH_SIZE, issue_counter, issues):
+        while is_batch_ready_to_be_sent(unsorted_queue_of_coupons, batch_size, issue_counter, issues):
             batch_counter += 1
             if batch_counter%10 == 0:
                 print("\rissue nr %d (%.1f%%)     batch nr %d"%(issue_counter,100*issue_counter/len(issues), batch_counter), end='')
 
+            # Generate events for the next batch
             result = send_out_new_batch(issues, members, utility_values, utility_indices, supporting_info,
-                                        historical_context, events_list, unsorted_queue_of_coupons, BATCH_SIZE,
+                                        historical_context, events_list, unsorted_queue_of_coupons, batch_size,
                                         prev_batch_unsent_coupons, max_existing_coupon_id, verbose)
 
             # Unpack the return values
@@ -195,20 +121,19 @@ def simulate_coupon_allocations(issues, members, utility_values, utility_indices
                 prev_batch_unsent_coupons, max_existing_coupon_id = result
 
 
+    # Turn the events_list into a dataframe and sort it
     TrackTime("Make events df")
     events_df = pd.DataFrame(events_list, columns=events_df.columns)
     events_df = events_df.sort_values(by=['at','coupon_follow_id','event']).reset_index(drop=True)
     return events_df
 
 
-multiset_unsent_coupons = Counter()
-coupons_to_check = []
 
 def send_out_new_batch(issues, members, utility_values, utility_indices, supporting_info, historical_context,
-                       events_list, unsorted_queue_of_coupons, BATCH_SIZE, prev_batch_unsent_coupons, 
+                       events_list, unsorted_queue_of_coupons, batch_size, prev_batch_unsent_coupons, 
                        max_existing_coupon_id, verbose):
 
-    batch_sent_at = unsorted_queue_of_coupons[BATCH_SIZE-1][TIMESTAMP_COLUMN]
+    batch_sent_at = unsorted_queue_of_coupons[batch_size-1][TIMESTAMP_COLUMN]
 
     # Check if we can try to resend coupons, or if they have already expired
     unsent_coupons_to_retry, unsent_coupons_now_expired = check_expiry_unsent_coupons(batch_sent_at, issues,
@@ -216,13 +141,13 @@ def send_out_new_batch(issues, members, utility_values, utility_indices, support
 
     if len(unsent_coupons_now_expired) > 0:
         offer_ids = list(map(lambda coupon: coupon[OFFER_ID_COLUMN+1], unsent_coupons_now_expired))
-        print("\n%d coupons expired without ever getting sent to an eligible member (offer-id: %s)"%(len(unsent_coupons_now_expired), str(list(set(offer_ids)))))
+        if verbose: print("\n%d coupons expired without ever getting sent to an eligible member (offer-id: %s)"%(len(unsent_coupons_now_expired), str(list(set(offer_ids)))))
     events_list.extend(unsent_coupons_now_expired)
 
 
     TrackTime("Extracting batch")
-    # actual_batch_size = BATCH_SIZE
-    actual_batch_size = BATCH_SIZE-1
+    # actual_batch_size = batch_size
+    actual_batch_size = batch_size-1
     while True:
         if len(unsorted_queue_of_coupons) == actual_batch_size:
             break
@@ -318,23 +243,6 @@ def send_out_new_batch(issues, members, utility_values, utility_indices, support
             historical_context[member_id][SET_OF_RECEIVED_OFFER_IDS].add(not_accepted_coupon[1+OFFER_ID_COLUMN])
 
 
-    global coupons_to_check
-    
-    unsent_coupon_ids = list(map(lambda unsent_coupon: unsent_coupon[COUPON_ID_COLUMN], unsent_coupons))
-    multiset_unsent_coupons.update(unsent_coupon_ids)
-
-    coupon_ids_unsent_more_than_5 = list(filter(lambda coupon_id: multiset_unsent_coupons[coupon_id] >= 5, unsent_coupon_ids))
-    sent_coupon_ids = list(map(lambda sent_coupon: sent_coupon[COUPON_ID_COLUMN+1], sent_coupons))
-    for coupon_id in coupon_ids_unsent_more_than_5:
-        if coupon_id in coupons_to_check:
-            if coupon_id in sent_coupon_ids:
-                print("\nFinally sent out a coupon after %d tries"%(multiset_unsent_coupons[coupon_id]))
-            # else:
-                # print("\n", coupon_id in unsent_coupon_ids)
-                
-
-    coupons_to_check = unsent_coupon_ids
-
     if len(unsent_coupons) == len(batch_to_send):
         print("\nDid not allocate any coupons from last batch")
     if verbose:
@@ -344,6 +252,24 @@ def send_out_new_batch(issues, members, utility_values, utility_indices, support
     return unsorted_queue_of_coupons, events_list, historical_context, unsent_coupons, max_existing_coupon_id
 
 
+def is_batch_ready_to_be_sent(unsorted_queue_of_coupons, batch_size, issue_counter, issues):
+    if len(unsorted_queue_of_coupons) < batch_size:
+        return False
+
+    TrackTime("Sorting coupon queue")
+    # unsorted_queue_of_coupons = sorted(unsorted_queue_of_coupons, key=lambda my_tuple: my_tuple[TIMESTAMP_COLUMN])
+    unsorted_queue_of_coupons.sort(key=lambda my_tuple: my_tuple[TIMESTAMP_COLUMN])
+
+    TrackTime("Checking if batch ready")
+    time_of_sending_next_batch = unsorted_queue_of_coupons[batch_size-1][TIMESTAMP_COLUMN]
+    if issue_counter+1 < len(issues):
+        time_of_next_issue = issues['sent_at'].iloc[issue_counter+1]
+        if time_of_next_issue < time_of_sending_next_batch:
+            # Even though we have enough coupons to reach minimum of batch_size,
+            # We first have to process another issue, to include in this next batch
+            return False
+
+    return True
 
 
 def release_new_issue(issue, max_existing_coupon_id, max_existing_coupon_follow_id, verbose):
@@ -463,6 +389,7 @@ def send_out_chosen_coupons(member_indices, coupon_indices, coupon_index_to_id, 
 
 
 def check_expiry_unsent_coupons(batch_sent_at, issues, prev_batch_unsent_coupons):
+    # TODO: evaluate 'redeem_till' if 'redeem_type' in ['on_date', 'til_date']
     TrackTime("Process prev batch unsent coupons")
     unsent_coupons_to_retry, unsent_coupons_now_expired = [], []
 
@@ -482,26 +409,6 @@ def check_expiry_unsent_coupons(batch_sent_at, issues, prev_batch_unsent_coupons
                 unsent_coupons_now_expired.append(event)
 
     return unsent_coupons_to_retry, unsent_coupons_now_expired
-
-
-def is_batch_ready_to_be_sent(unsorted_queue_of_coupons, BATCH_SIZE, issue_counter, issues):
-    if len(unsorted_queue_of_coupons) < BATCH_SIZE:
-        return False
-
-    TrackTime("Sorting coupon queue")
-    # unsorted_queue_of_coupons = sorted(unsorted_queue_of_coupons, key=lambda my_tuple: my_tuple[TIMESTAMP_COLUMN])
-    unsorted_queue_of_coupons.sort(key=lambda my_tuple: my_tuple[TIMESTAMP_COLUMN])
-
-    TrackTime("Checking if batch ready")
-    time_of_sending_next_batch = unsorted_queue_of_coupons[BATCH_SIZE-1][TIMESTAMP_COLUMN]
-    if issue_counter+1 < len(issues):
-        time_of_next_issue = issues['sent_at'].iloc[issue_counter+1]
-        if time_of_next_issue < time_of_sending_next_batch:
-            # Even though we have enough coupons to reach minimum of BATCH_SIZE,
-            # We first have to process another issue, to include in this next batch
-            return False
-
-    return True
 
 
 ############# PREPARATORY METHOD BEFORE CALLING AN ALLOCATOR_ALGORITHM #########################################
@@ -618,6 +525,63 @@ def determine_coupon_checked_expiry_time(created_at, accept_time, check=False):
                 # If a coupon expired at 15:06, it is sent to the next member at 16:05
                 checked_expiry = checked_expiry + dt.timedelta(hours=1)
                 return [checked_expiry]
+
+
+############# RETRIEVE DATA FROM DATABASE HERE FOR EASE OF ACCESS LATER #########################################
+
+def prepare_simulation_data(db):
+    TrackTime("Retrieve from db")
+    result = query_db.retrieve_from_sql_db(db, 'filtered_issues', 'filtered_offers', 'member')
+    filtered_issues, filtered_offers, all_members = result
+
+    TrackTime("Prepare for allocation")
+    # No functionality to incorporate 'aborted_at' has been made (so far)
+    assert np.all(filtered_issues['aborted_at'].isna())
+
+    # No functionality to incorporate 'reissue_unused_participants_of_coupons_enabled' has been made (so far)
+    # print("%d out of %d offers enabled reissued"%(np.sum(filtered_offers['reissue_unused_participants_of_coupons_enabled']), len(filtered_offers)))
+
+    relevant_offer_columns = ['id', 'category_id', 'accept_time', 'member_criteria_gender', 'member_criteria_min_age',
+                              'member_criteria_max_age', 'family_criteria_min_count', 'family_criteria_max_count',
+                              'family_criteria_child_age_range_min', 'family_criteria_child_age_range_max',
+                              'family_criteria_child_stages_child_stages', 'family_criteria_child_gender',
+                              'family_criteria_is_single', 'family_criteria_has_children']
+    filtered_offers = copy.copy(filtered_offers[relevant_offer_columns])
+
+    # TODO: 'receive_coupon_after', 'deactivated_at', 'archived_at', 'onboarded_at', 'created_at'
+    relevant_member_columns = ['id', 'active', 'member_state', 'email', 'mobile', 'date_of_birth', 'gender']
+    all_members = all_members[relevant_member_columns]
+
+    # email and phone number criteria
+    all_members = all_members[~all_members['email'].isna()]
+    all_members = all_members[~all_members['mobile'].isna()]
+
+    # Generate Utilities, the fit of a member to an offer
+    nr_agents = len(all_members)
+    nr_unique_resources = len(filtered_offers)
+    utility_values = np.random.uniform(0,0.7,size=(nr_agents, nr_unique_resources))
+
+    # Creates a dictionary from 'id' column to index of dataframe
+    member_id_to_index = all_members['id'].reset_index().set_index('id').to_dict()['index']
+    offer_id_to_index = filtered_offers['id'].reset_index().set_index('id').to_dict()['index']
+    utility_indices = (member_id_to_index, offer_id_to_index)
+
+    # Put offer_id as index of the dataframe (instead of 0 until len(df))
+    filtered_offers['id_index'] = filtered_offers['id']
+    filtered_offers = filtered_offers.set_index('id_index')
+    # Put issue_id as index of the dataframe (instead of 0 until len(df))
+    filtered_issues['id_index'] = filtered_issues['id']
+    filtered_issues = filtered_issues.set_index('id_index')
+
+    query = "select * from member_category"
+    all_member_categories = pd.read_sql_query(query, db)
+    query = "select * from member_family_member where type='child'"
+    all_children = pd.read_sql_query(query, db)
+    query = "select * from member_family_member where type='partner'"
+    all_partners = pd.read_sql_query(query, db)
+    supporting_info = (filtered_offers, all_member_categories, all_children, all_partners)
+
+    return filtered_issues, all_members, utility_values, utility_indices, supporting_info
 
 
 
