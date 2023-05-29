@@ -5,13 +5,13 @@ Created on Wed Apr 19 13:38:48 2023
 @author: Marco
 """
 
-import sqlalchemy
 import sys
+import sqlalchemy
 import regex as re
-from copy import copy
-import connect_db
 import datetime as dt
+from copy import copy
 
+import connect_db
 
 SQL_DB_PATH = "./quiet_2023-04-19.sql"
 

@@ -4,18 +4,23 @@ Created on Sat May 13 11:25:27 2023
 
 @author: Marco
 """
+import sys
 import enum
-import pandas as pd
 import sqlalchemy
+import pandas as pd
 
 
 # Relevant events according to the coupon lifecycle
 class Event(enum.Enum):
-    member_declined     = 0
-    member_accepted     = 1
+    member_accepted     = 0
+    member_declined     = 1
     member_let_expire   = 2 # i.e. after 3 days
-    coupon_sent         = 3
-    coupon_expired      = 4 # i.e. after 1 month
+    coupon_available    = 3
+    coupon_sent         = 4
+    coupon_expired      = 5 # i.e. after 1 month
+
+    def __lt__(self, other):
+        self.value < other.value
 
 
 def retrieve_from_sql_db(db, *table_names):
@@ -27,8 +32,17 @@ def retrieve_from_sql_db(db, *table_names):
     for table_name in table_names:
         print("Retrieving table '%s' from database"%table_name)
 
-        query = sqlalchemy.text("select * from %s"%table_name)
-        table = pd.read_sql_query(query, db)
+        try:
+            query = sqlalchemy.text("select * from %s"%table_name)
+            table = pd.read_sql_query(query, db)
+        except sqlalchemy.exc.SQLAlchemyError as e:
+            errno = int(str(e.orig).split()[0].strip("(,"))
+            if errno == 1146:
+                print("\nERROR: Table '%s' does not exist in database '%s'"%(table_name, str(db.engine).split("/")[-1][:-1]))
+                db.close()
+                sys.exit(0)
+            else:
+                raise
 
         # Translate str back to Event objects for easy comparison later on
         if 'member_response' in table.columns:

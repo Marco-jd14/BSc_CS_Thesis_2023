@@ -8,14 +8,9 @@ Created on Mon May  1 11:47:01 2023
 import sys
 import copy
 import enum
-import timeit
 import numpy as np
 import pandas as pd
 import datetime as dt
-from pprint import pprint
-from collections import Counter
-import matplotlib.pyplot as plt
-from dateutil.relativedelta import relativedelta
 from database.lib.tracktime import TrackTime, TrackReport
 
 import database.connect_db as connect_db
@@ -27,29 +22,6 @@ pd.set_option('display.max_columns', 100)
 pd.set_option('display.width', 130)
 
 
-
-relevant_columns = {'coupon': ['id', 'member_id', 'created_at', 'status',
-                               'sub_status', 'issue_id', 'redeem_till',
-                               'redeem_type', 'accept_time', 'offer_id', 'type'],
-                    'issue': ['id', 'offer_id', 'sent_at', 'amount', # same as issue_rule.amount if rule_id is not null
-                              'decay_count', 'expires_at', 'sent_acceptation_ratio',
-                              'total_issued', 'aborted_at'],
-                    'offer': ['id', 'offer_id', 'category_id', 'created_at',
-                              'redeem_till', 'redeem_type', 'accept_time', 
-                              'type', 'total_issued']
-                    }
-
-
-# # All the possible combinations of status + sub_status found in the data
-# status_to_event = {('declined',  None):              Event.member_declined,
-#                    ('declined', 'after_accepting'):  Event.member_declined,  # Discard the information that the member accepted initially
-#                    ('expired',  'after_receiving'):  Event.member_let_expire,
-#                    ('expired',  'after_accepting'):  Event.member_accepted,
-#                    ('expired',  'not_redeemed'):     Event.member_accepted,
-#                    ('redeemed',  None):              Event.member_accepted,
-#                    ('redeemed', 'after_expiring'):   Event.member_accepted}
-
-
 def main():
     TrackTime("Connect to db")
     conn = connect_db.establish_host_connection()
@@ -59,14 +31,6 @@ def main():
     TrackTime("Retrieve from db")
     result = query_db.retrieve_from_sql_db(db, 'filtered_coupons', 'filtered_issues', 'filtered_offers')
     filtered_coupons, filtered_issues, filtered_offers = result
-
-
-    """ TODO:
-    Get list of involved members, and compute
-       - probability of letting a coupon expire
-       - Subscribed categories
-       - probability of accepting based on subscribed categories (coupon --> issue --> offer --> cat)
-    """
 
 
     make_baseline_events_from_scratch  = True

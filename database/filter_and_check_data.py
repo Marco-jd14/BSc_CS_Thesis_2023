@@ -44,7 +44,7 @@ def main():
     print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
 
     # Choose whether or not to restart the data filtering & checking process
-    filter_and_check_data_from_scratch = True
+    filter_and_check_data_from_scratch = False
 
     if filter_and_check_data_from_scratch:
         # Also choose whether or not to save the result to the database ornot
@@ -355,9 +355,6 @@ def add_coupon_follow_ids_to_coupons(filtered_coupons, filtered_issues, filtered
         issue_info.append(info)
 
         if nr_coupons_sent_out_at_first != max_nr_active_coupons or max_nr_active_coupons != nr_unique_coupon_follow_ids:
-            continue
-        
-        if nr_unique_coupon_follow_ids != issue_row['amount']:
             # Print some information to the terminal as to why the issue is found to be inconsistent
             issues_to_filter_out.append(issue_row['id'])
             if verbose:
@@ -368,7 +365,7 @@ def add_coupon_follow_ids_to_coupons(filtered_coupons, filtered_issues, filtered
                 print("\t%30s"%"amount:", issue_row['amount'])
                 print("\t%30s"%"decay:", issue_row['decay_count'])
 
-            if True:#export_inconsistent_issues:
+            if export_inconsistent_issues:
                 # Make interesting offer information to export
                 offer_row = filtered_offers[filtered_offers['id'] == issue_row['offer_id']].squeeze()
                 offer_row = offer_row[['id','title','category_id','description','total_issued']]

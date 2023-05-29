@@ -23,8 +23,8 @@ def mysql_connect(host_args, database_name=None):
     """
     connection, err_msg = None, None
 
-    # DRIVER = 'mysqldb' # This is the preferred driver, but it does not work well with unescaped '%' in raw string text
-    DRIVER = 'mysqlconnector'
+    DRIVER = 'mysqldb' # This is the preferred driver, but it could be that it does not work well with unescaped '%' in raw string text
+    # DRIVER = 'mysqlconnector'
     try:
         # Connect with SQL Alchemy, as this is the preferred way for pandas to query the database
         connection_url = sqlalchemy.engine.URL.create("mysql+%s"%DRIVER, **host_args, database=database_name)
