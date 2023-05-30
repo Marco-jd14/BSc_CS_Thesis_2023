@@ -5,6 +5,8 @@ Created on Wed May 24 20:46:00 2023
 @author: Marco
 """
 
+import os
+import re
 import sys
 import copy
 import enum
@@ -33,14 +35,17 @@ def main():
     print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
 
     BATCH_SIZE = 5
+    export_folder = './timelines/'
+
+    convert_events_pkl_to_excel(3, export_folder)
+    sys.exit()
 
     try:
         preparation = prepare_simulation_data(db)
         events_df = simulate_coupon_allocations(BATCH_SIZE, greedy, *preparation)
 
         TrackTime("Export")
-        export_path = './timelines/events_list_%s.xlsx'%(str(dt.datetime.now().strftime("%Y.%m.%d-%H.%M.%S")))
-        events_df.to_excel(export_path, "events")
+        export_results(events_df, preparation[2], preparation[3], export_folder)
 
         print("")
         TrackReport()
@@ -53,6 +58,50 @@ def main():
 
         print("\n!!\nCould not finish making timeline\n!!")
 
+
+def export_results(events_df, utility_values, utility_indices, export_folder):
+
+    member_id_to_index, offer_id_to_index = utility_indices
+
+    member_id_to_index = pd.DataFrame.from_dict(member_id_to_index, orient='index', columns=['index'])
+    member_id_to_index = member_id_to_index.reset_index().rename(columns={'level_0':'member_id'}).sort_values(by='index')
+    offer_id_to_index = pd.DataFrame.from_dict(offer_id_to_index, orient='index', columns=['index'])
+    offer_id_to_index = offer_id_to_index.reset_index().rename(columns={'level_0':'offer_id'}).sort_values(by='index')
+
+    assert np.all(offer_id_to_index['index'].values == np.arange(len(offer_id_to_index)))
+    assert np.all(member_id_to_index['index'].values == np.arange(len(member_id_to_index)))
+
+    utility_df = pd.DataFrame(utility_values, index=member_id_to_index['member_id'].values, columns=offer_id_to_index['offer_id'].values)
+
+
+    # version_to_read = 2
+    # contents = os.listdir(export_folder)
+    # contents = list(filter(lambda name: re.search("^%d_.*\.pkl"%version_to_read, name), contents))
+    # events_df  = pd.read_pickle(export_folder + (contents[0] if "events_df" in contents[0] else contents[1]))
+    # utility_df = pd.read_pickle(export_folder + (contents[0] if "utility_df" in contents[0] else contents[1]))
+
+    time = str(dt.datetime.now().strftime("%Y.%m.%d-%H.%M.%S"))
+    contents = os.listdir(export_folder)
+    contents = list(filter(lambda name: re.search("^[0-9]+_.*\.pkl", name), contents))
+    versions = list(map(lambda name: int(name.split('_')[0]), contents))
+    next_version = max(versions) + 1
+
+    events_df.to_pickle(export_folder + '%d_events_df_%s.pkl'%(next_version, time))
+    utility_df.to_pickle(export_folder + '%d_utility_df_%s.pkl'%(next_version, time))
+
+    if False:
+        convert_events_pkl_to_excel(next_version, export_folder)
+
+
+def convert_events_pkl_to_excel(version, export_folder):
+    contents = os.listdir(export_folder)
+    contents = list(filter(lambda name: re.search("^%d_events_df.*\.pkl"%version, name), contents))
+    events_df  = pd.read_pickle(export_folder + contents[0])
+    time = os.path.splitext(contents[0])[0].split("_")[-1]
+
+    writer = pd.ExcelWriter(export_folder + "%d_events_list_%s.xlsx"%(version, time))
+    events_df.to_excel(writer, "events")
+    writer.close()
 
 
 # Batch column definitions

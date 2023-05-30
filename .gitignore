@@ -1,11 +1,10 @@
 # ignore SQL database
 *.sql
 
-# ignore Excel files
+# ignore data file
 *.xlsx
-
-# ignore csv file
 *.csv
+*.pkl
 
 # ignore compiled python files in pycache folder
 __pycache__/
