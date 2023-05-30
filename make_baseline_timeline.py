@@ -13,7 +13,7 @@ import pandas as pd
 import datetime as dt
 from database.lib.tracktime import TrackTime, TrackReport
 
-from coupon_allocator import determine_coupon_checked_expiry_time
+from coupon_stream_simulator import determine_coupon_checked_expiry_time
 import database.connect_db as connect_db
 import database.query_db as query_db
 Event = query_db.Event
@@ -42,14 +42,15 @@ def main():
         print(events_df)
 
         print("")
-        total_decay  = np.sum(events_df['coupon_count'][events_df['event'] == Event.coupon_expired])
+        total_decay  = np.sum(events_df['event'] == Event.coupon_expired)
         total_amount = np.sum(filtered_issues['amount'])
         print('Total number of coupons: %d'%total_amount)
         print('Total number of coupons never accepted: %d'%total_decay)
         print('Percentage of coupons never accepted: %.1f%%'%(total_decay/total_amount*100))
 
         TrackTime("to_csv")
-        events_df.to_csv('./baseline_events.csv', index=False)
+        events_df.to_csv('./timelines/baseline_events.csv', index=False)
+        events_df.to_pickle('./timelines/baseline_events.pkl')
     else:
         TrackTime("read_csv")
         events_df = pd.read_csv('./baseline_events.csv', parse_dates=['at'])
@@ -95,7 +96,7 @@ def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
     # To measure how well the function 'determine_coupon_checked_expiry_time' calculates the actual 'status_updated_at' time after a member letting a coupon expire
     incorrectly_predicted_created_after_expiry = 0
     events_list = []
-    events_df = pd.DataFrame(columns=['event','at','member_id','coupon_id','issue_id','offer_id','coupon_count', 'category_id'])
+    events_df = pd.DataFrame(columns=['event','at','member_id','coupon_id','coupon_follow_id','issue_id','offer_id', 'category_id'])
 
     for i, (index, coupon_row) in enumerate(filtered_coupons.iterrows()):
 
@@ -104,11 +105,11 @@ def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
             print("\rHandling coupon nr %d"%i,end='')
 
         TrackTime("ids_in_event")
-        ids_in_event = [coupon_row['member_id'], coupon_row['id'], coupon_row['issue_id'], coupon_row['offer_id']]
+        ids_in_event = [coupon_row['member_id'], coupon_row['id'], coupon_row['coupon_follow_id'], coupon_row['issue_id'], coupon_row['offer_id']]
 
         TrackTime("append")
         # Add the coupon sent event
-        event = [Event.coupon_sent, coupon_row['created_at']] + ids_in_event + [1] + [filtered_offers.loc[coupon_row['offer_id'],'category_id']]
+        event = [Event.coupon_sent, coupon_row['created_at']] + ids_in_event + [filtered_offers.loc[coupon_row['offer_id'],'category_id']]
         events_list.append(event)
 
         TrackTime('check time')
@@ -154,7 +155,7 @@ def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
 
         TrackTime("append")
         # Add the member-response event
-        event = [member_response, datetimestamp] + ids_in_event + [1] + [filtered_offers.loc[coupon_row['offer_id'],'category_id']]
+        event = [member_response, datetimestamp] + ids_in_event + [filtered_offers.loc[coupon_row['offer_id'],'category_id']]
         events_list.append(event)
 
         TrackTime("update issue_info")
@@ -170,17 +171,39 @@ def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
 
                 # This coupon_row is the last row in which a coupon with this issue_id appears
                 decay_nr = filtered_issues.loc[coupon_row['issue_id'],'amount'] - issue_info[coupon_row['issue_id']]['nr_accepted_so_far']
+                issue_coupons = filtered_coupons[filtered_coupons['issue_id'] == coupon_row['issue_id']] 
+                issue_coupons_accepted = issue_coupons[issue_coupons['member_response'] == Event.member_accepted]
+                accepted_follow_ids = set(issue_coupons_accepted['coupon_follow_id'])
+                non_accepted_follow_ids = set(np.arange(filtered_issues.loc[coupon_row['issue_id'],'amount'])) - accepted_follow_ids
+                assert len(non_accepted_follow_ids) == decay_nr
 
                 if decay_nr > 0:
                     TrackTime("append")
-                    event = [Event.coupon_expired, filtered_issues.loc[coupon_row['issue_id'],'expires_at'], np.nan, np.nan, coupon_row['issue_id'], coupon_row['offer_id'], decay_nr, filtered_offers.loc[coupon_row['offer_id'],'category_id']]
-                    events_list.append(event)
+                    event = [Event.coupon_expired, filtered_issues.loc[coupon_row['issue_id'],'expires_at'], np.nan, np.nan, coupon_row['coupon_follow_id'], coupon_row['issue_id'], coupon_row['offer_id'], filtered_offers.loc[coupon_row['offer_id'],'category_id']]
+                    events = []
+                    for follow_id in non_accepted_follow_ids:
+                        event[4] = follow_id
+                        events.append(copy.copy(event))
+                    events_list.extend(events)
 
 
     print("\nincorrectly_predicted_created_after_expiry:", incorrectly_predicted_created_after_expiry)
 
     print("\n")
-    events_df = pd.DataFrame(events_list, columns=['event','at','member_id','coupon_id','issue_id','offer_id','coupon_count', 'category_id'])
+    events_df = pd.DataFrame(events_list, columns=events_df.columns)
+
+    # Assign new unique coupon follow ids
+    unique_coupon_follow_ids = events_df.groupby(['issue_id','coupon_follow_id']).aggregate(test=('coupon_id','count')).reset_index()
+    unique_coupon_follow_ids['new_coupon_follow_id'] = np.arange(len(unique_coupon_follow_ids))
+    unique_coupon_follow_ids = unique_coupon_follow_ids.drop(columns=['test'])
+
+    # Merge into events dataframe
+    events_df = events_df.merge(unique_coupon_follow_ids, on=['issue_id','coupon_follow_id'])
+    events_df = events_df.drop(columns=['coupon_follow_id'])
+    events_df = events_df.rename(columns={'new_coupon_follow_id':'coupon_follow_id'})
+
+    # Reorder columns
+    events_df = events_df[['event','at','coupon_id','coupon_follow_id','issue_id','offer_id','member_id','category_id']]
 
     # Sort events chronologically, and if two events have the same timestamp, sort on index as secondary constraint
     events_df['index'] = events_df.index

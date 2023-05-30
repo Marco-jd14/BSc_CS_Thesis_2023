@@ -37,8 +37,8 @@ def main():
     BATCH_SIZE = 5
     export_folder = './timelines/'
 
-    convert_events_pkl_to_excel(3, export_folder)
-    sys.exit()
+    # convert_events_pkl_to_excel(4, export_folder)
+    # sys.exit()
 
     try:
         preparation = prepare_simulation_data(db)
