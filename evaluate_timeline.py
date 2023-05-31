@@ -9,6 +9,7 @@ import re
 import sys
 import copy
 import enum
+import json
 import traceback
 import numpy as np
 import pandas as pd
@@ -31,7 +32,7 @@ def main():
     # baseline = pd.read_csv('./timelines/baseline_events.csv')
     # baseline.to_pickle('./timelines/baseline_events.pkl')
     export_folder = './timelines/'
-    version_to_read = 3
+    versions_to_read = [5,6,7]
 
     TrackTime("Connect to db")
     conn = connect_db.establish_host_connection()
@@ -43,19 +44,29 @@ def main():
     filtered_issues, members = result
     print("")
 
+    # Read simulated events and info
+    sim_data = {}
     TrackTime("Read pickle")
-    events_df, utility_df = read_input_pickles(version_to_read, export_folder)
-    events_df['event'] = events_df['event'].apply(lambda event: Event[str(event)[len("Event."):]])
-    events_df = events_df.convert_dtypes()
+    for version_to_read in versions_to_read:
+        sim_events, info = read_input_pickles(version_to_read, export_folder)
+        sim_events['event'] = sim_events['event'].apply(lambda event: Event[str(event)[len("Event."):]])
+        sim_events = sim_events.convert_dtypes()
+        sim_data[info['allocator_algorithm'] + "_" + str(info['batch_size'])] = sim_events
 
-    baseline_events = pd.read_pickle(export_folder + 'baseline_events.pkl')
-    baseline_events['event'] = baseline_events['event'].apply(lambda event: Event[str(event)[len("Event."):]])
-    baseline_events = baseline_events.convert_dtypes()
+    # Read utility
+    utility_df = pd.read_pickle(export_folder + "utility_df.pkl")
+
+    # Read baseline events
+    base_events = pd.read_pickle(export_folder + 'baseline_events.pkl')
+    base_events['event'] = base_events['event'].apply(lambda event: Event[str(event)[len("Event."):]])
+    base_events = base_events.convert_dtypes()
 
     TrackTime("Evaluate timeline")
-    perform_sense_check(events_df, filtered_issues)
-    perform_sense_check(baseline_events, filtered_issues)
-    evaluate_timeline(events_df, utility_df, baseline_events, members['id'], filtered_issues['id'])
+    perform_sense_check(base_events, filtered_issues)
+    for result_name, sim_events in sim_data.items():
+        perform_sense_check(sim_events, filtered_issues)
+
+    evaluate_timeline(sim_data, base_events, utility_df, members, filtered_issues['id'])
 
     db.close()
     TrackReport()
@@ -64,34 +75,52 @@ def main():
 def read_input_pickles(version, export_folder):
     contents = os.listdir(export_folder)
     contents = list(filter(lambda name: re.search("^%d_.*\.pkl"%version, name), contents))
-    events_df  = pd.read_pickle(export_folder + (contents[0] if "events_df" in contents[0] else contents[1]))
-    utility_df = pd.read_pickle(export_folder + (contents[0] if "utility_df" in contents[0] else contents[1]))
-    return events_df, utility_df
+    events_df  = pd.read_pickle(export_folder + contents[0])
+    # utility_df = pd.read_pickle(export_folder + (contents[0] if "utility_df" in contents[0] else contents[1]))
+
+    f = open(export_folder + contents[0].replace("events_df",'info').replace('.pkl','.json'))
+    info = json.load(f)
+    f.close()
+
+    return events_df, info
 
 
-def evaluate_timeline(events_df, utility_df, baseline_events, member_ids, issue_ids):
+def evaluate_timeline(sim_data, base_events, utility_df, members, issue_ids):
     # print(events_df)
+    member_ids = members['id']
 
-    events_df = events_df[~events_df['member_id'].isna()]
-    baseline_events = baseline_events[~baseline_events['member_id'].isna()]
+    base_events = base_events[~base_events['member_id'].isna()]
+    base_scores = calculate_member_scores(base_events, utility_df, member_ids)
+    assert len(set(base_scores['member_id'].values)) == len(base_scores)
+    base_members = set(base_scores['member_id'][base_scores['utility'] > 0].values)
 
-    scores = calculate_member_scores(events_df, utility_df, member_ids)
-    baseline_scores = calculate_member_scores(baseline_events, utility_df, member_ids)
-    assert len(set(scores['member_id'].values)) == len(scores)
-    assert len(set(baseline_scores['member_id'].values)) == len(baseline_scores)
+    sim_utilities = {'baseline': base_scores}
 
-    members = set(scores['member_id'][scores['utility'] > 0].values)
-    baseline_members = set(baseline_scores['member_id'][baseline_scores['utility'] > 0].values)
-    print("nr members received coupon in simulation:", len(members))
-    print("nr members received coupon in baseline:", len(baseline_members))
-    print("\nnr members received coupon in baseline not in simulation:", len(baseline_members - members))
-    print("nr members received coupon in simulation not in baseline:", len(members - baseline_members))
-    
-    # print(baseline_scores)
-    # print(scores)
-    summarize_utilities(scores, 'simulation')
-    summarize_utilities(baseline_scores, 'baseline')
-    plot_utilities(scores, baseline_scores)
+    for result_name, sim_events in sim_data.items():
+        print("")
+        sim_events = sim_events[~sim_events['member_id'].isna()]
+        sim_scores = calculate_member_scores(sim_events, utility_df, member_ids)
+        assert len(set(sim_scores['member_id'].values)) == len(sim_scores)
+
+        sim_members = set(sim_scores['member_id'][sim_scores['utility'] > 0].values)
+        print("nr members received coupon in simulation:", len(sim_members))
+        print("nr members received coupon in baseline:", len(base_members))
+        print("\nnr members received coupon in baseline not in simulation:", len(base_members - sim_members))
+        print("nr members received coupon in simulation not in baseline:", len(sim_members - base_members))
+
+        inactive_members = set(members['id'][members['member_state'] != 'active'].values)
+        print('inactive baseline:', len(base_members.intersection(inactive_members)))
+        print('inactive simulation:', len(sim_members.intersection(inactive_members)))
+
+        sim_utilities[result_name] = sim_scores
+
+
+    for result_name, scores in sim_utilities.items():
+        summarize_utilities(scores, result_name)
+
+
+    TrackTime("plots")
+    plot_utilities(sim_utilities)
 
 
 def summarize_utilities(scores, result_name):
@@ -107,28 +136,46 @@ def summarize_utilities(scores, result_name):
     print("\t  Median non-zero Utility \t= %.5f"%np.sort(utilities[utilities>0])[int(0.5*np.sum(utilities>0))])
 
 
-def plot_utilities(scores, baseline_scores):
-    utilities = np.array(scores['utility'].astype(float).values)
-    baseline_utilities = np.array(baseline_scores['utility'].astype(float).values)
+def plot_utilities(sim_utilities):
+    fig_names = ['lorenz', 'sorted_utilities', 'nonzero_utilities_histogram']
+    
+    
+    # fig_names = set()
+    for i, (result_name, scores) in enumerate(sim_utilities.items()):
+        utilities = np.array(scores['utility'].astype(float).values)
 
-    plt.figure('lorenz')
-    # log_u = -1/np.log(np.sort(nonzero_perc_utilities))
-    # plt.plot(np.cumsum(log_u)/np.sum(log_u), label="log "+result_name)
-    plt.plot(np.cumsum(np.sort(utilities/np.sum(utilities))), label='simulation')
-    plt.plot(np.cumsum(np.sort(baseline_utilities/np.sum(baseline_utilities))), label='baseline')
+        # fig_names.update('lorenz')
+        plt.figure('lorenz')
+        plt.plot(np.cumsum(np.sort(utilities/np.sum(utilities))), label=result_name)
 
-    equality = np.arange(len(utilities))/len(utilities)
-    plt.plot(equality, 'k--', alpha=0.5, label='equality')
+        if i == 0:
+            equality = np.arange(len(utilities))/len(utilities)
+            plt.plot(equality, 'k--', alpha=0.5, label='equality')
 
-    plt.title('lorenz')
-    plt.legend()
+        # fig_names.update('sorted_utilities')
+        plt.figure('sorted_utilities')
+        plt.plot(np.sort(utilities), label=result_name)
 
-    plt.figure('sorted_utilities')
-    plt.plot(np.sort(utilities), label='simulation')
-    plt.plot(np.sort(baseline_utilities), label='baseline')
+        # fig_names.update('utilities_histogram')
+        # plt.figure('utilities_histogram')
+        # plt.hist(sim_utilities, bins=30, alpha=0.5, color='red', label='simulation')
+        # plt.hist(base_utilities, bins=30, alpha=0.5, color='blue', label='baseline')
 
-    plt.title('sorted_utilities')
-    plt.legend()
+
+    # fig_names.update('nonzero_utilities_histogram')
+    plt.figure('nonzero_utilities_histogram')
+    colors = ['red', 'blue', 'yellow', 'green']
+    for i, (result_name, scores) in enumerate(sim_utilities.items()):
+        utilities = np.array(scores['utility'].astype(float).values)
+
+        plt.hist(utilities[utilities>0], bins=30, alpha=0.5, color=colors[i], label=result_name)
+
+
+    for fig_name in fig_names:
+        plt.figure(fig_name)
+        plt.title(fig_name)
+        plt.legend()
+
 
 
 def calculate_member_scores(events_df, utility_df, member_ids):
