@@ -10,6 +10,7 @@ import re
 import sys
 import copy
 import enum
+import json
 import traceback
 import numpy as np
 import pandas as pd
@@ -24,9 +25,10 @@ import database.connect_db as connect_db
 import database.query_db as query_db
 Event = query_db.Event
 
-from allocator_algorithms import greedy
+from allocator_algorithms import greedy, max_utility
 
 np.random.seed(0)
+export_folder = './timelines/'
 
 def main():
     TrackTime("Connect to db")
@@ -34,18 +36,25 @@ def main():
     db   = connect_db.establish_database_connection(conn)
     print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
 
+
     BATCH_SIZE = 5
-    export_folder = './timelines/'
+    ALLOCATOR_ALGORITHM = 'greedy'
+
+    allocator_algorithms = {'greedy': greedy,
+                            'max_utility': max_utility}
 
     # convert_events_pkl_to_excel(4, export_folder)
     # sys.exit()
 
     try:
-        preparation = prepare_simulation_data(db)
-        events_df = simulate_coupon_allocations(BATCH_SIZE, greedy, *preparation)
+        data_prep = prepare_simulation_data(db)
+        util_prep = get_utility()#data_prep[1], data_prep[2][0])
+        events_df = simulate_coupon_allocations(BATCH_SIZE, allocator_algorithms[ALLOCATOR_ALGORITHM], *util_prep, *data_prep)
 
         TrackTime("Export")
-        export_results(events_df, preparation[2], preparation[3], export_folder)
+        info = {'batch_size': BATCH_SIZE,
+                'allocator_algorithm': ALLOCATOR_ALGORITHM}
+        export_results(events_df, *util_prep, info)
 
         print("")
         TrackReport()
@@ -59,7 +68,7 @@ def main():
         print("\n!!\nCould not finish making timeline\n!!")
 
 
-def export_results(events_df, utility_values, utility_indices, export_folder):
+def export_results(events_df, utility_values, utility_indices, info):
 
     member_id_to_index, offer_id_to_index = utility_indices
 
@@ -74,7 +83,9 @@ def export_results(events_df, utility_values, utility_indices, export_folder):
     utility_df = pd.DataFrame(utility_values, index=member_id_to_index['member_id'].values, columns=offer_id_to_index['offer_id'].values)
 
 
-    # version_to_read = 2
+    # info = {'batch_size': BATCH_SIZE,
+    #         'allocator_algorithm': ALLOCATOR_ALGORITHM}
+    # version_to_read = 3
     # contents = os.listdir(export_folder)
     # contents = list(filter(lambda name: re.search("^%d_.*\.pkl"%version_to_read, name), contents))
     # events_df  = pd.read_pickle(export_folder + (contents[0] if "events_df" in contents[0] else contents[1]))
@@ -89,11 +100,14 @@ def export_results(events_df, utility_values, utility_indices, export_folder):
     events_df.to_pickle(export_folder + '%d_events_df_%s.pkl'%(next_version, time))
     utility_df.to_pickle(export_folder + '%d_utility_df_%s.pkl'%(next_version, time))
 
+    with open(export_folder + '%d_info_%s.json'%(next_version, time), 'w') as fp:
+        json.dump(info, fp)
+
     if False:
-        convert_events_pkl_to_excel(next_version, export_folder)
+        convert_events_pkl_to_excel(next_version)
 
 
-def convert_events_pkl_to_excel(version, export_folder):
+def convert_events_pkl_to_excel(version):
     contents = os.listdir(export_folder)
     contents = list(filter(lambda name: re.search("^%d_events_df.*\.pkl"%version, name), contents))
     events_df  = pd.read_pickle(export_folder + contents[0])
@@ -111,7 +125,7 @@ ACCEPTED_LAST_COUPON_AT, LET_LAST_COUPON_EXPIRE_AT, SET_OF_RECEIVED_OFFER_IDS = 
 
 
 # def allocate_resources(resources_stream, resources_properties, agents, utility_values, utility_indices):
-def simulate_coupon_allocations(batch_size, get_allocation, issues, members, utility_values, utility_indices, supporting_info=None, verbose=False):
+def simulate_coupon_allocations(batch_size, get_allocation, utility_values, utility_indices, issues, members, supporting_info=None, verbose=False):
     # members = agents
     # offers = unique resources
     # issues = stream of resources
@@ -579,6 +593,33 @@ def determine_coupon_checked_expiry_time(created_at, accept_time, check=False):
 
 ############# RETRIEVE DATA FROM DATABASE HERE FOR EASE OF ACCESS LATER #########################################
 
+def get_utility(members=None, offers=None):
+
+    if members is not None and offers is not None:
+        # Generate Utilities, the fit of a member to an offer
+        nr_agents = len(members)
+        nr_unique_resources = len(offers)
+        utility_values = np.random.uniform(0,0.7,size=(nr_agents, nr_unique_resources))
+
+        # Creates a dictionary from 'id' column to index of dataframe
+        member_id_to_index = members['id'].reset_index(drop=True).reset_index().set_index('id').to_dict()['index']
+        offer_id_to_index = offers['id'].reset_index(drop=True).reset_index().set_index('id').to_dict()['index']
+        utility_indices = (member_id_to_index, offer_id_to_index)
+
+    else:
+        utility_df = pd.read_pickle(export_folder + "utility_df.pkl")
+        member_indices = np.arange(utility_df.shape[0])
+        member_id_to_index = {utility_df.index[member_index]: member_index for member_index in member_indices}
+
+        offer_indices = np.arange(utility_df.shape[1])
+        offer_id_to_index = {utility_df.columns[offer_index]: offer_index for offer_index in offer_indices}
+
+        utility_values = utility_df.values
+        utility_indices = (member_id_to_index, offer_id_to_index)
+
+    return utility_values, utility_indices
+
+
 def prepare_simulation_data(db):
     TrackTime("Retrieve from db")
     result = query_db.retrieve_from_sql_db(db, 'filtered_issues', 'filtered_offers', 'member')
@@ -606,16 +647,6 @@ def prepare_simulation_data(db):
     all_members = all_members[~all_members['email'].isna()]
     all_members = all_members[~all_members['mobile'].isna()]
 
-    # Generate Utilities, the fit of a member to an offer
-    nr_agents = len(all_members)
-    nr_unique_resources = len(filtered_offers)
-    utility_values = np.random.uniform(0,0.7,size=(nr_agents, nr_unique_resources))
-
-    # Creates a dictionary from 'id' column to index of dataframe
-    member_id_to_index = all_members['id'].reset_index().set_index('id').to_dict()['index']
-    offer_id_to_index = filtered_offers['id'].reset_index().set_index('id').to_dict()['index']
-    utility_indices = (member_id_to_index, offer_id_to_index)
-
     # Put offer_id as index of the dataframe (instead of 0 until len(df))
     filtered_offers['id_index'] = filtered_offers['id']
     filtered_offers = filtered_offers.set_index('id_index')
@@ -631,7 +662,7 @@ def prepare_simulation_data(db):
     all_partners = pd.read_sql_query(query, db)
     supporting_info = (filtered_offers, all_member_categories, all_children, all_partners)
 
-    return filtered_issues, all_members, utility_values, utility_indices, supporting_info
+    return filtered_issues, all_members, supporting_info
 
 
 
