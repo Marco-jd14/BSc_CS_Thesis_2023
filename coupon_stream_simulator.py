@@ -44,15 +44,18 @@ def main():
     
     data_prep = prepare_simulation_data(db)
     util_prep = get_utility()#data_prep[1], data_prep[2][0])
-    sim_folders = list(filter(os.path.isdir, os.listdir(export_folder)))
+    sim_folders = list(filter(lambda name: os.path.isdir(export_folder + name), os.listdir(export_folder)))
     run_nr = max(list(map(lambda folder_name: int(folder_name.split("_")[-1]), sim_folders))) + 1 if len(sim_folders) > 0 else 1
 
     BATCH_SIZE = 6
-    ALLOCATOR_ALGORITHM = 'greedy'
+    ALLOCATOR_ALGORITHM = 'max_utility'
     NR_SIMULATIONS = 2
 
+    start_time = dt.datetime.now().replace(microsecond=0)
     for sim_nr in range(NR_SIMULATIONS):
-        print("\nStarting simulation %d"%sim_nr)
+        print("\nStarting simulation %d at %s (%s later)"%(sim_nr, dt.datetime.now().replace(microsecond=0), str(dt.datetime.now() - start_time).split('.')[0] ))
+        start_time = dt.datetime.now()
+
         events_df = simulate_coupon_allocations(BATCH_SIZE, allocator_algorithms[ALLOCATOR_ALGORITHM], *util_prep, *data_prep)
         export_timeline(events_df, sim_nr, run_nr)
 
@@ -64,19 +67,20 @@ def main():
     print("")
     TrackReport()
 
+
 def export_timeline(events_df, sim_nr, run_nr):
-    folder = export_folder + "simulation_%d\\"%run_nr
+    folder = export_folder + "run_%d\\"%run_nr
     if not os.path.exists(folder):
         os.makedirs(folder)
 
-    events_df.to_pickle(folder + '%d.%d_events_df.pkl'%(sim_nr, run_nr))
+    events_df.to_pickle(folder + '%d.%d_events_df.pkl'%(run_nr, sim_nr))
 
     if False:
         convert_events_pkl_to_excel(sim_nr, run_nr)
 
 
 def export_sim_info(utility_values, utility_indices, info, run_nr):
-    folder = export_folder + "simulation_%d\\"%run_nr
+    folder = export_folder + "run_%d\\"%run_nr
 
     member_id_to_index, offer_id_to_index = utility_indices
 
