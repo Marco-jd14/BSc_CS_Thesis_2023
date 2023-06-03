@@ -28,7 +28,10 @@ Event = query_db.Event
 from allocator_algorithms import greedy, max_utility
 
 np.random.seed(0)
+
 export_folder = './timelines/'
+allocator_algorithms = {'greedy': greedy,
+                        'max_utility': max_utility}
 
 def main():
     TrackTime("Connect to db")
@@ -36,39 +39,44 @@ def main():
     db   = connect_db.establish_database_connection(conn)
     print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
 
-
-    BATCH_SIZE = 5
-    ALLOCATOR_ALGORITHM = 'greedy'
-
-    allocator_algorithms = {'greedy': greedy,
-                            'max_utility': max_utility}
-
     # convert_events_pkl_to_excel(4, export_folder)
     # sys.exit()
+    
+    data_prep = prepare_simulation_data(db)
+    util_prep = get_utility()#data_prep[1], data_prep[2][0])
+    sim_folders = list(filter(os.path.isdir, os.listdir(export_folder)))
+    run_nr = max(list(map(lambda folder_name: int(folder_name.split("_")[-1]), sim_folders))) + 1 if len(sim_folders) > 0 else 1
 
-    try:
-        data_prep = prepare_simulation_data(db)
-        util_prep = get_utility()#data_prep[1], data_prep[2][0])
+    BATCH_SIZE = 6
+    ALLOCATOR_ALGORITHM = 'greedy'
+    NR_SIMULATIONS = 2
+
+    for sim_nr in range(NR_SIMULATIONS):
+        print("\nStarting simulation %d"%sim_nr)
         events_df = simulate_coupon_allocations(BATCH_SIZE, allocator_algorithms[ALLOCATOR_ALGORITHM], *util_prep, *data_prep)
-
-        TrackTime("Export")
-        info = {'batch_size': BATCH_SIZE,
-                'allocator_algorithm': ALLOCATOR_ALGORITHM}
-        export_results(events_df, *util_prep, info)
-
-        print("")
-        TrackReport()
-    except:
-        print("\n",traceback.format_exc())
-        db.close()
-
-        print("")
-        TrackReport()
-
-        print("\n!!\nCould not finish making timeline\n!!")
+        export_timeline(events_df, sim_nr, run_nr)
 
 
-def export_results(events_df, utility_values, utility_indices, info):
+    info = {'batch_size': BATCH_SIZE,
+            'allocator_algorithm': ALLOCATOR_ALGORITHM}
+    export_sim_info(*util_prep, info, run_nr)
+
+    print("")
+    TrackReport()
+
+def export_timeline(events_df, sim_nr, run_nr):
+    folder = export_folder + "simulation_%d\\"%run_nr
+    if not os.path.exists(folder):
+        os.makedirs(folder)
+
+    events_df.to_pickle(folder + '%d.%d_events_df.pkl'%(sim_nr, run_nr))
+
+    if False:
+        convert_events_pkl_to_excel(sim_nr, run_nr)
+
+
+def export_sim_info(utility_values, utility_indices, info, run_nr):
+    folder = export_folder + "simulation_%d\\"%run_nr
 
     member_id_to_index, offer_id_to_index = utility_indices
 
@@ -82,32 +90,13 @@ def export_results(events_df, utility_values, utility_indices, info):
 
     utility_df = pd.DataFrame(utility_values, index=member_id_to_index['member_id'].values, columns=offer_id_to_index['offer_id'].values)
 
-
-    # info = {'batch_size': BATCH_SIZE,
-    #         'allocator_algorithm': ALLOCATOR_ALGORITHM}
-    # version_to_read = 3
-    # contents = os.listdir(export_folder)
-    # contents = list(filter(lambda name: re.search("^%d_.*\.pkl"%version_to_read, name), contents))
-    # events_df  = pd.read_pickle(export_folder + (contents[0] if "events_df" in contents[0] else contents[1]))
-    # utility_df = pd.read_pickle(export_folder + (contents[0] if "utility_df" in contents[0] else contents[1]))
-
-    time = str(dt.datetime.now().strftime("%Y.%m.%d-%H.%M.%S"))
-    contents = os.listdir(export_folder)
-    contents = list(filter(lambda name: re.search("^[0-9]+_.*\.pkl", name), contents))
-    versions = list(map(lambda name: int(name.split('_')[0]), contents))
-    next_version = max(versions) + 1
-
-    events_df.to_pickle(export_folder + '%d_events_df_%s.pkl'%(next_version, time))
-    utility_df.to_pickle(export_folder + '%d_utility_df_%s.pkl'%(next_version, time))
-
-    with open(export_folder + '%d_info_%s.json'%(next_version, time), 'w') as fp:
+    utility_df.to_pickle(folder + '%d_utility_df.pkl'%(run_nr))
+    with open(folder + '%d_info.json'%(run_nr), 'w') as fp:
         json.dump(info, fp)
 
-    if False:
-        convert_events_pkl_to_excel(next_version)
 
 
-def convert_events_pkl_to_excel(version):
+def convert_events_pkl_to_excel(sim_nr, run_nr):
     contents = os.listdir(export_folder)
     contents = list(filter(lambda name: re.search("^%d_events_df.*\.pkl"%version, name), contents))
     events_df  = pd.read_pickle(export_folder + contents[0])
@@ -147,8 +136,6 @@ def simulate_coupon_allocations(batch_size, get_allocation, utility_values, util
 
     # Initialize historical context and the 3 values based on member-id (key)
     historical_context = {member_id: [None, None, set()] for member_id in members['id'].values}
-
-    print("\nStarting simulation\n")
 
     # Loop over all issues to release
     batch_counter = 0

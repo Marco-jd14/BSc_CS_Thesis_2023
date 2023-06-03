@@ -5,6 +5,7 @@
 *.xlsx
 *.csv
 *.pkl
+*.json
 
 # ignore compiled python files in pycache folder
 __pycache__/
