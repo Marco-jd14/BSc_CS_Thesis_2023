@@ -35,7 +35,7 @@ def main():
 
     # baseline = pd.read_csv('./timelines/baseline_events.csv')
     # baseline.to_pickle('./timelines/baseline_events.pkl')
-    run_nrs_to_read = [1, 4]
+    run_nrs_to_read = [4,5,6]
 
     TrackTime("Connect to db")
     conn = connect_db.establish_host_connection()
@@ -166,6 +166,28 @@ def evaluate_timelines(all_run_data, base_data, utility_df, members, issue_ids):
 
 
 
+def summarize_utility_distribution(member_utils_all_sims):
+
+    all_sim_summaries = {}
+    for col_name in member_utils_all_sims.columns:
+        col = member_utils_all_sims[col_name]
+        sim_summary = {}
+        sim_summary['sum'] = col.sum()
+        sim_summary['average'] = col.mean()
+        sim_summary['avg_nonzero'] = col[col>0].mean()
+        sim_summary['max'] = col.max()
+        sim_summary['min_nonzero'] = col[col>0].min()
+        median_index = int(0.5*len(col))
+        sim_summary['median'] = col.sort_values().values[median_index]
+        median_nonzero_index = int(0.5*np.sum(col>0))
+        sim_summary['median_nonzero'] = col[col>0].sort_values().values[median_nonzero_index]
+
+        all_sim_summaries[col_name] = sim_summary
+
+    all_sim_summaries = pd.DataFrame.from_dict(all_sim_summaries, orient='index')
+    # print(all_sim_summaries)
+    return all_sim_summaries
+
 
 def summarize_utilities(scores, result_name):
     utilities = np.array(scores['utility'].astype(float).values)
@@ -181,49 +203,68 @@ def summarize_utilities(scores, result_name):
 
 
 def plot_utilities(all_run_data, base_data):
-    fig_names = ['lorenz', 'sorted_utilities', 'nonzero_utilities_histogram']
-    fig_names = ['nonzero_utilities_histogram']
+    fig_names = ['avg_lorenz', 'sorted_utilities', 'nonzero_utilities_histogram']#, 'summary']
 
     base_member_utils, = base_data
+    base_summary = summarize_utility_distribution(base_member_utils)
+    colors = ['red', 'blue', 'yellow']
+    base_col = 'green'
 
-    # # fig_names = set()
-    # for i, (run_name, run_data) in enumerate(all_run_data.items()):
-    #     member_utils_all_sims, = run_data
-    #     utilities = np.array(scores['utility'].astype(float).values)
-
-    #     # fig_names.update('lorenz')
-    #     plt.figure('lorenz')
-    #     plt.plot(np.cumsum(np.sort(utilities/np.sum(utilities))), label=result_name)
-
-    #     if i == 0:
-    #         equality = np.arange(len(utilities))/len(utilities)
-    #         plt.plot(equality, 'k--', alpha=0.5, label='equality')
-
-    #     # fig_names.update('sorted_utilities')
-    #     plt.figure('sorted_utilities')
-    #     plt.plot(np.sort(utilities), label=result_name)
-
-        # fig_names.update('utilities_histogram')
-        # plt.figure('utilities_histogram')
-        # plt.hist(sim_utilities, bins=30, alpha=0.5, color='red', label='simulation')
-        # plt.hist(base_utilities, bins=30, alpha=0.5, color='blue', label='baseline')
-
-
-    # fig_names.update('nonzero_utilities_histogram')
-    plt.figure('nonzero_utilities_histogram')
-    colors = ['red', 'blue', 'yellow', 'green']
     for i, (run_name, run_data) in enumerate(all_run_data.items()):
         member_utils_all_sims, = run_data
-        flat_utils = member_utils_all_sims.values.reshape(-1)
-        # utilities = np.array(scores['utility'].astype(float).values)
+        summaries_all_sims = summarize_utility_distribution(member_utils_all_sims)
 
-        # plt.hist(flat_utils, bins=30, alpha=0.5, color=colors[i], label=run_name, density=True)
+
+        ####### Lorenz Curve Plot #############################
+        plt.figure('avg_lorenz')
+        if i == 0:
+            equality = np.arange(len(member_utils_all_sims))/len(member_utils_all_sims)
+            plt.plot(equality, 'k--', alpha=0.5, label='equality')
+
+            baseline = base_member_utils.values.reshape(-1)
+            plt.plot(np.cumsum(np.sort(baseline)/np.sum(baseline)), label='baseline', color=base_col)
+
+        sorted_utils = np.sort(member_utils_all_sims.values, axis=0)
+        avg_utils = np.average(sorted_utils, axis=1)
+
+        plt.plot(np.cumsum(np.sort(avg_utils)/np.sum(avg_utils)), label=run_name, color=colors[i])
+
+
+        ####### Sorted Utilities Plot #############################
+        plt.figure('sorted_utilities')
+        if i == 0:
+            plt.plot(np.sort(base_member_utils.values.reshape(-1)), label='baseline', color=base_col)
+        plt.plot(np.sort(avg_utils), label=run_name, color=colors[i])
+
+
+        ####### Summary Subplots #######################################
+        plt.figure('summary', figsize=(10,15))
+        subplot_data_cols = ['average', 'avg_nonzero', 'median', 'median_nonzero', 'max', 'min_nonzero']
+        for j, col_name in enumerate(subplot_data_cols, 1):
+            plt.subplot(3,2,j)
+            data = summaries_all_sims[col_name].values
+            plt.hist(data, bins=12, alpha=0.5, color=colors[i], label=run_name, density=True)
+
+            if i == len(all_run_data)-1:
+                # x_value = base_summary[col_name]
+                # xmin, xmax, ymin, ymax = plt.axis()
+                # plt.plot([x_value, x_value], [ymin, ymax], '-.', color=base_col, linewidth=5, label='baseline')
+                # plt.ylim([ymin, ymax])
+                plt.legend()
+                plt.title(col_name)
+
+
+        ####### Utilities histogram #######################################
+        plt.figure('nonzero_utilities_histogram')
+        if i == 0:
+            plt.hist(base_member_utils.values[base_member_utils.values>0], bins=30, alpha=0.5, color=base_col, label='baseline', density=True)
+
+        member_utils_all_sims, = run_data
+        flat_utils = member_utils_all_sims.values.reshape(-1)
         plt.hist(flat_utils[flat_utils>0], bins=30, alpha=0.5, color=colors[i], label=run_name, density=True)
 
 
-    plt.hist(base_member_utils.values[base_member_utils.values>0], bins=30, alpha=0.5, color=colors[-1], label='baseline', density=True)
-
-
+    # Set the title and legend
     for fig_name in fig_names:
         plt.figure(fig_name)
         plt.title(fig_name)
