@@ -18,6 +18,7 @@ import datetime as dt
 from pprint import pprint
 from collections import Counter
 import matplotlib.pyplot as plt
+from dateutil.relativedelta import relativedelta
 from database.lib.tracktime import TrackTime, TrackReport
 
 import database.connect_db as connect_db
@@ -35,7 +36,7 @@ def main():
 
     # baseline = pd.read_csv('./timelines/baseline_events.csv')
     # baseline.to_pickle('./timelines/baseline_events.pkl')
-    run_nrs_to_read = [4,5,6]
+    run_nrs_to_read = [3]
 
     TrackTime("Connect to db")
     conn = connect_db.establish_host_connection()
@@ -53,8 +54,9 @@ def main():
     # Read simulated events and info
     TrackTime("Get all run data")
     all_run_data = {}
+    RECOMPUTE = True
     for run_nr in run_nrs_to_read:
-        if not os.path.exists(run_folder%run_nr + '%d_run_data.pkl'%run_nr):
+        if RECOMPUTE or not os.path.exists(run_folder%run_nr + '%d_run_data.pkl'%run_nr):
             run_name, run_data = extract_relevant_info(run_nr, utility_df, members['id'], filtered_issues)
             with open(run_folder%run_nr + '%d_run_name.pkl'%run_nr, 'wb') as fp:
                 pickle.dump(run_name, fp)
@@ -82,6 +84,7 @@ def main():
     evaluate_timelines(all_run_data, base_data, utility_df, members, filtered_issues['id'])
     TrackTime("Plots")
     plot_utilities(all_run_data, base_data)
+    # plot_monthly_stats(all_run_data, base_data)
 
     db.close()
     TrackReport()
@@ -93,6 +96,7 @@ def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
     timeline_nrs = list(map(lambda name: int(name.split('_')[0].split('.')[-1]), timeline_files))
 
     member_utils_all_sims = None
+    monthly_stats_all_sims = None
     for sim_nr in timeline_nrs:
         TrackTime("Read pickle")
         sim_events = pd.read_pickle(run_folder%run_nr + "%d.%d_events_df.pkl"%(run_nr, sim_nr))
@@ -104,7 +108,23 @@ def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
 
         TrackTime("Extract timeline info")
         sim_info = extract_timeline_info(sim_events, utility_df, member_ids)
-        member_utils, = sim_info
+        member_utils, monthly_stats = sim_info
+
+        flat_values = monthly_stats.values.flatten('F')
+        columns = pd.MultiIndex.from_product([monthly_stats.columns, list(monthly_stats.index)], names=['event', 'month'])
+        flat_monthly_stats = pd.DataFrame([flat_values], columns=columns)
+
+        if monthly_stats_all_sims is None:
+            monthly_stats_all_sims = flat_monthly_stats
+        else:
+            assert len(monthly_stats) == len(monthly_stats_all_sims[monthly_stats.columns[0]].columns)
+            assert np.all(monthly_stats_all_sims.columns == flat_monthly_stats.columns)
+            monthly_stats_all_sims = pd.concat([monthly_stats_all_sims, flat_monthly_stats])
+        
+        for event_name in monthly_stats.columns:
+            for month in list(monthly_stats.index):
+                assert monthly_stats.loc[month, event_name] == monthly_stats_all_sims[event_name][month].iloc[sim_nr]
+
 
         TrackTime("Get all run data")
         if member_utils_all_sims is None:
@@ -113,31 +133,106 @@ def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
             assert np.all(member_utils.index == member_utils_all_sims.index)
             member_utils_all_sims['sim_%d'%sim_nr] = member_utils['utility']
 
+    # print(monthly_stats_all_sims)
+
     TrackTime("Read info")
     f = open(run_folder%run_nr + "%d_info.json"%run_nr)
     info = json.load(f)
     f.close()
 
     run_name = info['allocator_algorithm'] + "_" + str(info['batch_size'])
-    return run_name, (member_utils_all_sims, )
+    return run_name, (member_utils_all_sims, monthly_stats_all_sims)
 
 
-def extract_timeline_info(sim_events, utility_df, member_ids):
+def extract_timeline_info(events, utility_df, member_ids):
 
-    sim_events = sim_events[~sim_events['member_id'].isna()]
-    sim_scores = calculate_member_scores(sim_events, utility_df, member_ids)
-    assert len(set(sim_scores['member_id'].values)) == len(sim_scores)
+    member_events = events[~events['member_id'].isna()]
+    member_scores = calculate_member_scores(member_events, utility_df, member_ids)
+    assert len(set(member_scores['member_id'].values)) == len(member_scores)
+    member_utils = member_scores[['utility']]
 
-    member_utils = sim_scores[['utility']]
+    monthly_stats = make_monthly_summary(events)
 
-    return member_utils,
+    return member_utils, monthly_stats
+
+
+# # Relevant events according to the coupon lifecycle
+# class Event(enum.Enum):
+#     member_accepted     = 0
+#     member_declined     = 1
+#     member_let_expire   = 2 # i.e. after 3 days
+#     coupon_available    = 3
+#     coupon_sent         = 4
+#     coupon_expired      = 5 # i.e. after 1 month
+
+def last_day_of_month(date):
+    if date.month == 12:
+        return date.replace(day=31)
+
+    return date.replace(month=date.month+1, day=1) - dt.timedelta(days=1)
+
+
+def datetime_range(start_date, end_date, delta):
+    result = []
+    nxt = start_date
+    delta = relativedelta(**delta)
+
+    while nxt <= end_date:
+        result.append(nxt)
+        nxt += delta
+
+    result.append(end_date)
+    return result
+
+def make_monthly_summary(events):
+    # event_counts = events[['event','at']].groupby('event').count().rename(columns={'at':'nr'})
+    # print(event_counts)
+    # for event in Event:
+    #     print(event)
+
+    # coupon_follow_id_counts = events[['event','coupon_follow_id']].groupby('coupon_follow_id').count().reset_index().rename(columns={'event':'nr_events'})
+    # print(coupon_follow_id_counts)
+    # nr_coupons_with_one_event = np.sum(coupon_follow_id_counts['nr_events'] == 2)
+    # print(nr_coupons_with_one_event)
+
+    # available_coupon_ids = set(events['coupon_follow_id'][events['event'] == Event.coupon_available ].values)
+    # sent_coupon_ids = set(events['coupon_follow_id'][events['event'] == Event.coupon_sent ].values)
+    # print(available_coupon_ids - sent_coupon_ids)
+    # assert nr_coupons_with_one_event == event_counts.loc[Event.coupon_available,'nr'] - event_counts.loc[Event.coupon_sent,'nr']
+
+    start_date = dt.datetime.combine(events['at'].iloc[0].replace(day=1).date(), dt.time(0,0,0))
+    # end_date   = dt.datetime.combine(last_day_of_month(events['at'].iloc[-1]).date(), dt.time(23,59,59))
+    end_date = dt.datetime.strptime("2022-12-31 23:59:59", "%Y-%m-%d %H:%M:%S")
+
+    delta = {'months':1}
+    intervals = datetime_range(start_date, end_date, delta)
+
+    events_grouped_by_month = events.groupby(pd.cut(events['at'], intervals))
+    all_months_summaries = {}
+    for month, monthly_events in events_grouped_by_month:
+        monthly_summary = {}
+
+        nr_events = monthly_events[['event','at']].groupby('event').count().rename(columns={'at':'nr_events'})
+        for event in Event:
+            event_name = "nr_" + "_".join(str(event).split('_')[1:])
+            if event in nr_events.index:
+                monthly_summary[event_name] = nr_events.loc[event, 'nr_events']
+            else:
+                monthly_summary[event_name] = 0
+
+        all_months_summaries[month] = monthly_summary
+
+    all_months_summaries = pd.DataFrame.from_dict(all_months_summaries, orient='index')
+    # print(all_months_summaries)
+    return all_months_summaries
+
 
 
 def evaluate_timelines(all_run_data, base_data, utility_df, members, issue_ids):
     # print(events_df)
     member_ids = members['id']
 
-    base_member_utils, = base_data
+    base_member_utils, base_monthly_stats = base_data
 
     # assert len(set(base_scores['member_id'].values)) == len(base_scores)
     # base_members = set(base_scores['member_id'][base_scores['utility'] > 0].values)
@@ -165,6 +260,18 @@ def evaluate_timelines(all_run_data, base_data, utility_df, members, issue_ids):
     return
 
 
+def summarize_utilities(scores, result_name):
+    utilities = np.array(scores['utility'].astype(float).values)
+    perc_utilities = utilities/np.sum(utilities)
+
+    print("\n"+result_name)
+    print("\t\t\t\tTotal Utility \t= %.5f"%(np.sum(utilities)))
+    print("\t\t\t  Average Utility \t= %.5f"%(np.average(utilities)))
+    print("\t Average non-zero Utility \t= %.5f"%(np.average(utilities[utilities>0])))
+    print("   Maximum (non-zero) Utility \t= %.5f"%np.max(utilities))
+    print("\t Minimum non-zero Utility \t= %.5f"%(np.min(utilities[utilities>0])))
+    print("\t  Median non-zero Utility \t= %.5f"%np.sort(utilities[utilities>0])[int(0.5*np.sum(utilities>0))])
+
 
 def summarize_utility_distribution(member_utils_all_sims):
 
@@ -189,29 +296,17 @@ def summarize_utility_distribution(member_utils_all_sims):
     return all_sim_summaries
 
 
-def summarize_utilities(scores, result_name):
-    utilities = np.array(scores['utility'].astype(float).values)
-    perc_utilities = utilities/np.sum(utilities)
-
-    print("\n"+result_name)
-    print("\t\t\t\tTotal Utility \t= %.5f"%(np.sum(utilities)))
-    print("\t\t\t  Average Utility \t= %.5f"%(np.average(utilities)))
-    print("\t Average non-zero Utility \t= %.5f"%(np.average(utilities[utilities>0])))
-    print("   Maximum (non-zero) Utility \t= %.5f"%np.max(utilities))
-    print("\t Minimum non-zero Utility \t= %.5f"%(np.min(utilities[utilities>0])))
-    print("\t  Median non-zero Utility \t= %.5f"%np.sort(utilities[utilities>0])[int(0.5*np.sum(utilities>0))])
-
 
 def plot_utilities(all_run_data, base_data):
     fig_names = ['avg_lorenz', 'sorted_utilities', 'nonzero_utilities_histogram']#, 'summary']
 
-    base_member_utils, = base_data
+    base_member_utils, _ = base_data
     base_summary = summarize_utility_distribution(base_member_utils)
     colors = ['red', 'blue', 'yellow']
     base_col = 'green'
 
     for i, (run_name, run_data) in enumerate(all_run_data.items()):
-        member_utils_all_sims, = run_data
+        member_utils_all_sims, _ = run_data
         summaries_all_sims = summarize_utility_distribution(member_utils_all_sims)
 
 
@@ -259,7 +354,6 @@ def plot_utilities(all_run_data, base_data):
         if i == 0:
             plt.hist(base_member_utils.values[base_member_utils.values>0], bins=30, alpha=0.5, color=base_col, label='baseline', density=True)
 
-        member_utils_all_sims, = run_data
         flat_utils = member_utils_all_sims.values.reshape(-1)
         plt.hist(flat_utils[flat_utils>0], bins=30, alpha=0.5, color=colors[i], label=run_name, density=True)
 
