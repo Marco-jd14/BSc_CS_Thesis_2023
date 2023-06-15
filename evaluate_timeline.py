@@ -16,6 +16,7 @@ import datetime as dt
 from pprint import pprint
 from collections import Counter
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mtick
 from dateutil.relativedelta import relativedelta
 from database.lib.tracktime import TrackTime, TrackReport
 
@@ -30,13 +31,13 @@ pd.set_option('display.width', 90)
 global_folder = './timelines/'
 run_folder = './timelines/run_%d/'
 
-SHOW_BASELINE = False
+SHOW_BASELINE = True
 
 def main():
 
     # baseline = pd.read_csv('./timelines/baseline_events.csv')
     # baseline.to_pickle('./timelines/baseline_events.pkl')
-    run_nrs_to_read = [4,5,6]
+    run_nrs_to_read = [4,6]
 
     TrackTime("Connect to db")
     conn = connect_db.establish_host_connection()
@@ -52,10 +53,10 @@ def main():
     utility_df = pd.read_pickle(global_folder + "utility_df.pkl")
 
 
+    RECOMPUTE = False
     # Read simulated events and info
     TrackTime("Get all run data")
     all_run_data = {}
-    RECOMPUTE = False
     for run_nr in run_nrs_to_read:
         if RECOMPUTE or not os.path.exists(run_folder%run_nr + '%d_run_data.pkl'%run_nr):
             run_name, run_data = extract_relevant_info(run_nr, utility_df, members['id'], filtered_issues)
@@ -76,9 +77,9 @@ def main():
     base_events = pd.read_pickle(global_folder + 'baseline_events.pkl')
     base_events['event'] = base_events['event'].apply(lambda event: Event[str(event)[len("Event."):]])
     base_events = base_events.convert_dtypes()
-
+    # Extract baseline information
+    perform_timeline_sense_check(base_events, filtered_issues)
     base_data = extract_timeline_info(base_events, utility_df, members['id'])
-    perform_sense_check(base_events, filtered_issues)
 
     # Evaluate and plot
     TrackTime("Evaluate")
@@ -97,7 +98,6 @@ def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
     timeline_nrs = sorted(list(map(lambda name: int(name.split('_')[0].split('.')[-1]), timeline_files)))
 
     member_stats_all_sims = None
-    # member_utils_all_sims = None
     monthly_stats_all_sims = None
     for sim_nr in timeline_nrs:
         print("\rSimulation %d"%sim_nr, end='\t\t')
@@ -107,7 +107,7 @@ def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
         sim_events = sim_events.convert_dtypes()
 
         TrackTime("Perform sense check")
-        perform_sense_check(sim_events, filtered_issues)
+        perform_timeline_sense_check(sim_events, filtered_issues)
 
         TrackTime("Extract timeline info")
         sim_info = extract_timeline_info(sim_events, utility_df, member_ids)
@@ -124,7 +124,7 @@ def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
             assert len(monthly_stats) == len(monthly_stats_all_sims[monthly_stats.columns[0]].columns)
             assert np.all(monthly_stats_all_sims.columns == flat_monthly_stats.columns)
             monthly_stats_all_sims = pd.concat([monthly_stats_all_sims, flat_monthly_stats], ignore_index=True)
-        
+
         for event_name in monthly_stats.columns:
             for month in list(monthly_stats.index):
                 assert monthly_stats.loc[month, event_name] == monthly_stats_all_sims[event_name][month].iloc[sim_nr]
@@ -141,17 +141,6 @@ def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
             assert set(member_stats.columns) == set(member_stats_all_sims.columns.levels[0])
             for col in member_stats.columns:
                 member_stats_all_sims[col, 'sim_%d'%sim_nr] = member_stats[col]
-
-        # member_stats_all_sims = member_stats_all_sims.sort_index(axis=1)
-        # print("\n",member_stats_all_sims)
-
-        # TrackTime("Get all run data")
-        # member_utils = member_stats[['total_utility']]
-        # if member_utils_all_sims is None:
-        #     member_utils_all_sims = member_utils.rename(columns={'total_utility':'sim_%d'%sim_nr})
-        # else:
-        #     assert np.all(member_utils.index == member_utils_all_sims.index)
-        #     member_utils_all_sims['sim_%d'%sim_nr] = member_utils['total_utility']
 
 
     member_stats_all_sims = member_stats_all_sims.sort_index(axis=1)
@@ -359,6 +348,7 @@ def plot_member_stats(all_run_data, base_data):
 
     for i, (run_name, run_data) in enumerate(all_run_data.items()):
         member_stats_all_sims, _ = run_data
+        nr_simulations = len(member_stats_all_sims['total_utility'].columns)
 
 
         ####### Lorenz Curve Plot #############################
@@ -383,20 +373,19 @@ def plot_member_stats(all_run_data, base_data):
         plt.plot(np.sort(avg_utils), label=run_name, color=colors[i])
 
 
-        ####### Compete Summary Subplots #######################################
+        ####### Complete Summary Subplots #######################################
         columns_to_plot = ['total_utility']
         fig_names.extend(list(map(lambda s: '%s_summary'%s, columns_to_plot)))
 
         for data_col_name in columns_to_plot:
             plt.figure('%s_summary'%data_col_name, figsize=(10,15))
-
             summary_to_plot = summarize_distribution(member_stats_all_sims[data_col_name])
             subplot_data_cols = ['average', 'avg_nonzero', 'median', 'median_nonzero', 'max', 'min_nonzero']
             for j, summary_col_name in enumerate(subplot_data_cols, 1):
                 plt.subplot(3,2,j)
                 data = summary_to_plot[summary_col_name].values
-                plt.hist(data, bins=12, alpha=0.5, color=colors[i], label=run_name, density=True)
-    
+                plt.hist(data, bins=12, alpha=0.5, color=colors[i], label=run_name, density=False)
+
                 if i == len(all_run_data)-1:
                     # if SHOW_BASELINE:
                     #     x_value = base_summary[summary_col_name]
@@ -407,18 +396,18 @@ def plot_member_stats(all_run_data, base_data):
                     plt.title(summary_col_name)
 
 
-        ####### Average Subplots #######################################
+        ####### Sent Coupon Worth 2 * Subplots #######################################
         columns_to_plot = ['avg_worth_sent_coupon', 'median_worth_sent_coupon',
                           'min_worth_sent_coupon', 'max_worth_sent_coupon']
-        fig_names.append('worth_sent_coupons')
+        fig_names.append('average worth_sent_coupons per simulation')
 
-        plt.figure('worth_sent_coupons', figsize=(10,10))
+        plt.figure('average worth_sent_coupons per simulation', figsize=(10,10))
         for j, data_col_name in enumerate(columns_to_plot, 1):
 
             summary_to_plot = summarize_distribution(member_stats_all_sims[data_col_name])
-            plt.subplot(2,2,j)
+            ax = plt.subplot(2,2,j)
             data = summary_to_plot['average'].values
-            plt.hist(data, bins=12, alpha=0.5, color=colors[i], label=run_name, density=True)
+            plt.hist(data, bins=12, alpha=0.5, color=colors[i], label=run_name, density=False)
 
             if i == len(all_run_data)-1:
                 # if SHOW_BASELINE:
@@ -429,27 +418,52 @@ def plot_member_stats(all_run_data, base_data):
                 plt.legend()
                 plt.title('average of [%s sent-coupon-utility per member]'%data_col_name.split("_")[0])
 
+        plt.figure('worth_sent_coupons per member', figsize=(10,10))
+        fig_names.append('worth_sent_coupons per member')
+        only_nonzero = True
+        prev_ax = None
+        for j, col in enumerate(columns_to_plot, 1):
+            ax = plt.subplot(2,2,j, sharex=prev_ax, sharey=prev_ax)
+            prev_ax = ax
+            flat_values = member_stats_all_sims[col].values.reshape(-1)
+            to_plot = flat_values[flat_values>0] if only_nonzero else flat_values
+            plt.hist(to_plot, bins=30, alpha=0.5, range=None, color=colors[i], label=run_name, density=False)
+
+            if i == len(all_run_data)-1:
+                if SHOW_BASELINE:
+                    values = base_member_stats[col].values
+                    to_plot = np.array([values[values>0] if only_nonzero else values]*nr_simulations).reshape(-1)
+                    plt.hist(to_plot, bins=30, alpha=0.3, color=base_col, label='baseline', density=False)
+
+                plt.legend()
+                plt.title('%s worth of sent-coupon-utilities per member'%col.split("_")[0])
+                def scale_floats(x, *args):
+                    return "{:.1f}".format(float(x)/nr_simulations)
+                ax.yaxis.set_major_formatter(mtick.FuncFormatter(scale_floats))
+
 
         ####### All combined histograms #######################################
-        columns_to_plot = ['total_utility', 'nr_accepted', 'nr_sent', 'avg_worth_sent_coupon',
-                            'median_worth_sent_coupon', 'min_worth_sent_coupon', 'max_worth_sent_coupon',
-                            ]#'nr_declined', 'nr_let_expire']
+        columns_to_plot = ['total_utility', 'nr_accepted', 'nr_sent']#'nr_declined', 'nr_let_expire']
         fig_names.extend(list(map(lambda s: '%s_histogram'%s, columns_to_plot)))
-        nonzero_or_not = [True, True, True, True,
-                          True, True, True, True
-                          ]#True, True]
-
-        for col, nonzero in zip(columns_to_plot, nonzero_or_not):
+        only_nonzeros = [True, False, False]# False, False]
+        
+        for col, only_nonzero in zip(columns_to_plot, only_nonzeros):
             plt.figure('%s_histogram'%col)
             if i == 0 and SHOW_BASELINE:
                 values = base_member_stats[col].values
-                to_plot = values[values>0] if nonzero else values
-                plt.hist(to_plot, bins=30, alpha=0.5, color=base_col, label='baseline', density=True)
+                to_plot = values[values>0] if only_nonzero else values
+                to_plot = np.array([to_plot]*nr_simulations).reshape(-1)
+                plt.hist(to_plot, bins=30, alpha=0.3, color=base_col, label='baseline', density=False)
 
             flat_values = member_stats_all_sims[col].values.reshape(-1)
-            to_plot = flat_values[flat_values>0] if nonzero else flat_values
-            plt.hist(to_plot, bins=30, alpha=0.5, color=colors[i], label=run_name, density=True)
+            to_plot = flat_values[flat_values>0] if only_nonzero else flat_values
+            plt.hist(to_plot, bins=30, alpha=0.5, range=None, color=colors[i], label=run_name, density=False)
 
+            if i == len(all_run_data)-1:
+                def scale_ints(x, *args):
+                    return "%d"%(int(float(x)/nr_simulations))
+                ax = plt.gca()
+                ax.yaxis.set_major_formatter(mtick.FuncFormatter(scale_ints))
 
 
     # Set the title and legend
@@ -514,7 +528,7 @@ def calc_utility(utility_df, member_id, accepted_offers):
     return utility_scores
 
 
-def perform_sense_check(events_df, issues):
+def perform_timeline_sense_check(events_df, issues):
     relevant_issue_columns_check   = ['id', 'offer_id', 'sent_at', 'amount', 'expires_at']
     relevant_issue_columns_compare = ['id', 'total_issued', 'nr_accepted', 'nr_expired', 'nr_not_sent_on']
     issues = issues[relevant_issue_columns_check + relevant_issue_columns_compare[1:]]
