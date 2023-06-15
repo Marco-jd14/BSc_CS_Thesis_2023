@@ -8,10 +8,8 @@ import os
 import re
 import sys
 import copy
-import enum
 import json
 import pickle
-import traceback
 import numpy as np
 import pandas as pd
 import datetime as dt
@@ -32,13 +30,13 @@ pd.set_option('display.width', 90)
 global_folder = './timelines/'
 run_folder = './timelines/run_%d/'
 
-SHOW_BASELINE = True
+SHOW_BASELINE = False
 
 def main():
 
     # baseline = pd.read_csv('./timelines/baseline_events.csv')
     # baseline.to_pickle('./timelines/baseline_events.pkl')
-    run_nrs_to_read = [4,6]
+    run_nrs_to_read = [4,5,6]
 
     TrackTime("Connect to db")
     conn = connect_db.establish_host_connection()
@@ -86,8 +84,8 @@ def main():
     TrackTime("Evaluate")
     evaluate_timelines(all_run_data, base_data, utility_df, members, filtered_issues['id'])
     TrackTime("Plots")
-    # plot_utilities(all_run_data, base_data)
-    plot_monthly_stats(all_run_data, base_data)
+    plot_member_stats(all_run_data, base_data)
+    # plot_monthly_stats(all_run_data, base_data)
 
     db.close()
     TrackReport()
@@ -98,7 +96,8 @@ def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
     timeline_files = list(filter(lambda name: re.search("^%d.[0-9]+_events_df.pkl"%run_nr, name), contents))
     timeline_nrs = sorted(list(map(lambda name: int(name.split('_')[0].split('.')[-1]), timeline_files)))
 
-    member_utils_all_sims = None
+    member_stats_all_sims = None
+    # member_utils_all_sims = None
     monthly_stats_all_sims = None
     for sim_nr in timeline_nrs:
         print("\rSimulation %d"%sim_nr, end='\t\t')
@@ -112,9 +111,9 @@ def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
 
         TrackTime("Extract timeline info")
         sim_info = extract_timeline_info(sim_events, utility_df, member_ids)
-        member_utils, monthly_stats = sim_info
+        member_stats, monthly_stats = sim_info
 
-        TrackTime("Combine timeline info")
+        TrackTime("Combine monthly info")
         flat_values = monthly_stats.values.flatten('F')
         columns = pd.MultiIndex.from_product([monthly_stats.columns, list(monthly_stats.index)], names=['event', 'month'])
         flat_monthly_stats = pd.DataFrame([flat_values], columns=columns)
@@ -131,14 +130,31 @@ def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
                 assert monthly_stats.loc[month, event_name] == monthly_stats_all_sims[event_name][month].iloc[sim_nr]
 
 
-        TrackTime("Get all run data")
-        if member_utils_all_sims is None:
-            member_utils_all_sims = member_utils.rename(columns={'utility':'sim_%d'%sim_nr})
+        TrackTime("Combine member info")
+        if member_stats_all_sims is None:
+            member_stats = member_stats.set_index('member_id')
+            member_stats.columns = pd.MultiIndex.from_product([member_stats.columns, ['sim_0']])
+            member_stats_all_sims = member_stats
         else:
-            assert np.all(member_utils.index == member_utils_all_sims.index)
-            member_utils_all_sims['sim_%d'%sim_nr] = member_utils['utility']
+            member_stats = member_stats.set_index('member_id')
+            assert len(member_stats) == len(member_stats_all_sims)
+            assert set(member_stats.columns) == set(member_stats_all_sims.columns.levels[0])
+            for col in member_stats.columns:
+                member_stats_all_sims[col, 'sim_%d'%sim_nr] = member_stats[col]
 
-    # print(monthly_stats_all_sims)
+        # member_stats_all_sims = member_stats_all_sims.sort_index(axis=1)
+        # print("\n",member_stats_all_sims)
+
+        # TrackTime("Get all run data")
+        # member_utils = member_stats[['total_utility']]
+        # if member_utils_all_sims is None:
+        #     member_utils_all_sims = member_utils.rename(columns={'total_utility':'sim_%d'%sim_nr})
+        # else:
+        #     assert np.all(member_utils.index == member_utils_all_sims.index)
+        #     member_utils_all_sims['sim_%d'%sim_nr] = member_utils['total_utility']
+
+
+    member_stats_all_sims = member_stats_all_sims.sort_index(axis=1)
 
     TrackTime("Read info")
     f = open(run_folder%run_nr + "%d_info.json"%run_nr)
@@ -146,19 +162,18 @@ def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
     f.close()
 
     run_name = info['allocator_algorithm'] + "_" + str(info['batch_size'])
-    return run_name, (member_utils_all_sims, monthly_stats_all_sims)
+    return run_name, (member_stats_all_sims, monthly_stats_all_sims)
 
 
 def extract_timeline_info(events, utility_df, member_ids):
 
     member_events = events[~events['member_id'].isna()]
-    member_scores = calculate_member_scores(member_events, utility_df, member_ids)
-    assert len(set(member_scores['member_id'].values)) == len(member_scores)
-    member_utils = member_scores[['utility']]
+    member_stats = calculate_member_scores(member_events, utility_df, member_ids)
+    assert len(set(member_stats['member_id'].values)) == len(member_stats)
 
     monthly_stats = make_monthly_summary(events)
 
-    return member_utils, monthly_stats
+    return member_stats, monthly_stats
 
 
 # # Relevant events according to the coupon lifecycle
@@ -233,10 +248,11 @@ def make_monthly_summary(events):
 
 
 def evaluate_timelines(all_run_data, base_data, utility_df, members, issue_ids):
+    pass
     # print(events_df)
-    member_ids = members['id']
+    # member_ids = members['id']
 
-    base_member_utils, base_monthly_stats = base_data
+    # base_member_utils, base_monthly_stats = base_data
 
     # assert len(set(base_scores['member_id'].values)) == len(base_scores)
     # base_members = set(base_scores['member_id'][base_scores['utility'] > 0].values)
@@ -264,44 +280,30 @@ def evaluate_timelines(all_run_data, base_data, utility_df, members, issue_ids):
     return
 
 
-def summarize_utilities(scores, result_name):
-    utilities = np.array(scores['utility'].astype(float).values)
-    perc_utilities = utilities/np.sum(utilities)
 
-    print("\n"+result_name)
-    print("\t\t\t\tTotal Utility \t= %.5f"%(np.sum(utilities)))
-    print("\t\t\t  Average Utility \t= %.5f"%(np.average(utilities)))
-    print("\t Average non-zero Utility \t= %.5f"%(np.average(utilities[utilities>0])))
-    print("   Maximum (non-zero) Utility \t= %.5f"%np.max(utilities))
-    print("\t Minimum non-zero Utility \t= %.5f"%(np.min(utilities[utilities>0])))
-    print("\t  Median non-zero Utility \t= %.5f"%np.sort(utilities[utilities>0])[int(0.5*np.sum(utilities>0))])
-
-
-def summarize_utility_distribution(member_utils_all_sims):
+def summarize_distribution(member_utils_all_sims):
 
     all_sim_summaries = {}
-    for col_name in member_utils_all_sims.columns:
-        col = member_utils_all_sims[col_name]
+    for sim_name in member_utils_all_sims.columns:
+        sim_values = member_utils_all_sims[sim_name]
         sim_summary = {}
-        sim_summary['sum'] = col.sum()
-        sim_summary['average'] = col.mean()
-        sim_summary['avg_nonzero'] = col[col>0].mean()
-        sim_summary['max'] = col.max()
-        sim_summary['min_nonzero'] = col[col>0].min()
-        median_index = int(0.5*len(col))
-        sim_summary['median'] = col.sort_values().values[median_index]
-        median_nonzero_index = int(0.5*np.sum(col>0))
-        sim_summary['median_nonzero'] = col[col>0].sort_values().values[median_nonzero_index]
+        sim_summary['sum'] = sim_values.sum()
+        sim_summary['average'] = sim_values.mean()
+        sim_summary['avg_nonzero'] = sim_values[sim_values>0].mean()
+        sim_summary['max'] = sim_values.max()
+        sim_summary['min_nonzero'] = sim_values[sim_values>0].min()
+        median_index = int(0.5*len(sim_values))
+        sim_summary['median'] = sim_values.sort_values().values[median_index]
+        median_nonzero_index = int(0.5*np.sum(sim_values>0))
+        sim_summary['median_nonzero'] = sim_values[sim_values>0].sort_values().values[median_nonzero_index]
 
-        all_sim_summaries[col_name] = sim_summary
+        all_sim_summaries[sim_name] = sim_summary
 
     all_sim_summaries = pd.DataFrame.from_dict(all_sim_summaries, orient='index')
-    # print(all_sim_summaries)
     return all_sim_summaries
 
 
 def plot_monthly_stats(all_run_data, base_data):
-    fig_names = ['timelines']
     _, base_monthly_stats = base_data
 
     colors = ['red', 'blue', 'yellow']
@@ -345,29 +347,30 @@ def plot_monthly_stats(all_run_data, base_data):
 
 
 
-def plot_utilities(all_run_data, base_data):
-    fig_names = ['avg_lorenz', 'sorted_utilities', 'nonzero_utilities_histogram']#, 'summary']
+def plot_member_stats(all_run_data, base_data):
+    fig_names = ['avg_lorenz', 'sorted_utilities']
 
-    base_member_utils, _ = base_data
-    base_summary = summarize_utility_distribution(base_member_utils)
+    base_member_stats, _ = base_data
+    base_member_utils = base_member_stats[['total_utility']]
+    base_summary = summarize_distribution(base_member_utils)
+
     colors = ['red', 'blue', 'yellow']
     base_col = 'green'
 
     for i, (run_name, run_data) in enumerate(all_run_data.items()):
-        member_utils_all_sims, _ = run_data
-        summaries_all_sims = summarize_utility_distribution(member_utils_all_sims)
+        member_stats_all_sims, _ = run_data
 
 
         ####### Lorenz Curve Plot #############################
         plt.figure('avg_lorenz')
-        if i == 0 and SHOW_BASELINE:
-            equality = np.arange(len(member_utils_all_sims))/len(member_utils_all_sims)
+        if i == 0:
+            equality = np.arange(len(member_stats_all_sims))/len(member_stats_all_sims)
             plt.plot(equality, 'k--', alpha=0.5, label='equality')
 
             baseline = base_member_utils.values.reshape(-1)
             plt.plot(np.cumsum(np.sort(baseline)/np.sum(baseline)), label='baseline', color=base_col)
 
-        sorted_utils = np.sort(member_utils_all_sims.values, axis=0)
+        sorted_utils = np.sort(member_stats_all_sims['total_utility'].values, axis=0)
         avg_utils = np.average(sorted_utils, axis=1)
 
         plt.plot(np.cumsum(np.sort(avg_utils)/np.sum(avg_utils)), label=run_name, color=colors[i])
@@ -375,43 +378,87 @@ def plot_utilities(all_run_data, base_data):
 
         ####### Sorted Utilities Plot #############################
         plt.figure('sorted_utilities')
-        if i == 0 and SHOW_BASELINE:
+        if i == 0:
             plt.plot(np.sort(base_member_utils.values.reshape(-1)), label='baseline', color=base_col)
         plt.plot(np.sort(avg_utils), label=run_name, color=colors[i])
 
 
-        ####### Summary Subplots #######################################
-        plt.figure('summary', figsize=(10,15))
-        subplot_data_cols = ['average', 'avg_nonzero', 'median', 'median_nonzero', 'max', 'min_nonzero']
-        for j, col_name in enumerate(subplot_data_cols, 1):
-            plt.subplot(3,2,j)
-            data = summaries_all_sims[col_name].values
+        ####### Compete Summary Subplots #######################################
+        columns_to_plot = ['total_utility']
+        fig_names.extend(list(map(lambda s: '%s_summary'%s, columns_to_plot)))
+
+        for data_col_name in columns_to_plot:
+            plt.figure('%s_summary'%data_col_name, figsize=(10,15))
+
+            summary_to_plot = summarize_distribution(member_stats_all_sims[data_col_name])
+            subplot_data_cols = ['average', 'avg_nonzero', 'median', 'median_nonzero', 'max', 'min_nonzero']
+            for j, summary_col_name in enumerate(subplot_data_cols, 1):
+                plt.subplot(3,2,j)
+                data = summary_to_plot[summary_col_name].values
+                plt.hist(data, bins=12, alpha=0.5, color=colors[i], label=run_name, density=True)
+    
+                if i == len(all_run_data)-1:
+                    # if SHOW_BASELINE:
+                    #     x_value = base_summary[summary_col_name]
+                    #     xmin, xmax, ymin, ymax = plt.axis()
+                    #     plt.plot([x_value, x_value], [ymin, ymax], '-.', color=base_col, linewidth=5, label='baseline')
+                    #     plt.ylim([ymin, ymax])
+                    plt.legend()
+                    plt.title(summary_col_name)
+
+
+        ####### Average Subplots #######################################
+        columns_to_plot = ['avg_worth_sent_coupon', 'median_worth_sent_coupon',
+                          'min_worth_sent_coupon', 'max_worth_sent_coupon']
+        fig_names.append('worth_sent_coupons')
+
+        plt.figure('worth_sent_coupons', figsize=(10,10))
+        for j, data_col_name in enumerate(columns_to_plot, 1):
+
+            summary_to_plot = summarize_distribution(member_stats_all_sims[data_col_name])
+            plt.subplot(2,2,j)
+            data = summary_to_plot['average'].values
             plt.hist(data, bins=12, alpha=0.5, color=colors[i], label=run_name, density=True)
 
             if i == len(all_run_data)-1:
                 # if SHOW_BASELINE:
-                #     x_value = base_summary[col_name]
+                #     x_value = base_summary['average']
                 #     xmin, xmax, ymin, ymax = plt.axis()
                 #     plt.plot([x_value, x_value], [ymin, ymax], '-.', color=base_col, linewidth=5, label='baseline')
                 #     plt.ylim([ymin, ymax])
                 plt.legend()
-                plt.title(col_name)
+                plt.title('average of [%s sent-coupon-utility per member]'%data_col_name.split("_")[0])
 
 
-        ####### Utilities histogram #######################################
-        plt.figure('nonzero_utilities_histogram')
-        if i == 0 and SHOW_BASELINE:
-            plt.hist(base_member_utils.values[base_member_utils.values>0], bins=30, alpha=0.5, color=base_col, label='baseline', density=True)
+        ####### All combined histograms #######################################
+        columns_to_plot = ['total_utility', 'nr_accepted', 'nr_sent', 'avg_worth_sent_coupon',
+                            'median_worth_sent_coupon', 'min_worth_sent_coupon', 'max_worth_sent_coupon',
+                            ]#'nr_declined', 'nr_let_expire']
+        fig_names.extend(list(map(lambda s: '%s_histogram'%s, columns_to_plot)))
+        nonzero_or_not = [True, True, True, True,
+                          True, True, True, True
+                          ]#True, True]
 
-        flat_utils = member_utils_all_sims.values.reshape(-1)
-        plt.hist(flat_utils[flat_utils>0], bins=30, alpha=0.5, color=colors[i], label=run_name, density=True)
+        for col, nonzero in zip(columns_to_plot, nonzero_or_not):
+            plt.figure('%s_histogram'%col)
+            if i == 0 and SHOW_BASELINE:
+                values = base_member_stats[col].values
+                to_plot = values[values>0] if nonzero else values
+                plt.hist(to_plot, bins=30, alpha=0.5, color=base_col, label='baseline', density=True)
+
+            flat_values = member_stats_all_sims[col].values.reshape(-1)
+            to_plot = flat_values[flat_values>0] if nonzero else flat_values
+            plt.hist(to_plot, bins=30, alpha=0.5, color=colors[i], label=run_name, density=True)
+
 
 
     # Set the title and legend
     for fig_name in fig_names:
         plt.figure(fig_name)
-        plt.title(fig_name)
+        plt.suptitle(fig_name)
         plt.legend()
+        # plt.save()
+        # plt.show()
 
 
 
@@ -426,12 +473,36 @@ def calculate_member_scores(events_df, utility_df, member_ids):
     accepted_offers = accepted_offers.set_index('offer_id')
     accepted_offers_per_member = accepted_offers.groupby('member_id').groups
 
-    total_utility_per_member = {member_id: calc_utility(utility_df, member_id, accepted_offers) for member_id, accepted_offers in accepted_offers_per_member.items()}
-    total_utility_per_member = pd.DataFrame.from_dict(total_utility_per_member, orient='index', columns=['utility']).reset_index()
-    total_utility_per_member.columns = ['member_id'] + list(total_utility_per_member.columns[1:])
+    total_utility_per_member = {member_id: np.sum(calc_utility(utility_df, member_id, accepted_offers)) for member_id, accepted_offers in accepted_offers_per_member.items()}
+    total_utility_per_member = pd.DataFrame.from_dict(total_utility_per_member, orient='index', columns=['total_utility']).reset_index().rename(columns={'index':'member_id'})
+    # avg_worth_accepted_coupon = total_util / nr_accepted
 
-    scores = scores.merge(total_utility_per_member)
+    # Get a list of coupon-utilities per member
+    sent_offers = events_df[events_df['event'] == Event.coupon_sent][['member_id','offer_id']]
+    sent_offers = sent_offers.set_index('offer_id')
+    sent_offers_per_member = sent_offers.groupby('member_id').groups
+    received_utility_per_member = {member_id: calc_utility(utility_df, member_id, received_offers) for member_id, received_offers in sent_offers_per_member.items()}
 
+    # Summarize the list of coupon-utilities into one measure (per member)
+    avg_worth_sent_coupon    = {member_id: np.average(list_of_received_utilities) for member_id, list_of_received_utilities in received_utility_per_member.items()}
+    median_worth_sent_coupon = {member_id: np.median(list_of_received_utilities) for member_id, list_of_received_utilities in received_utility_per_member.items()}
+    min_worth_sent_coupon    = {member_id: np.min(list_of_received_utilities) for member_id, list_of_received_utilities in received_utility_per_member.items()}
+    max_worth_sent_coupon    = {member_id: np.max(list_of_received_utilities) for member_id, list_of_received_utilities in received_utility_per_member.items()}
+
+    avg_worth_sent_coupon    = pd.DataFrame.from_dict(avg_worth_sent_coupon, orient='index', columns=['avg_worth_sent_coupon']).reset_index().rename(columns={'index':'member_id'})
+    median_worth_sent_coupon = pd.DataFrame.from_dict(median_worth_sent_coupon, orient='index', columns=['median_worth_sent_coupon']).reset_index().rename(columns={'index':'member_id'})
+    min_worth_sent_coupon    = pd.DataFrame.from_dict(min_worth_sent_coupon, orient='index', columns=['min_worth_sent_coupon']).reset_index().rename(columns={'index':'member_id'})
+    max_worth_sent_coupon    = pd.DataFrame.from_dict(max_worth_sent_coupon, orient='index', columns=['max_worth_sent_coupon']).reset_index().rename(columns={'index':'member_id'})
+
+    # Merge the tables into one
+    tables_to_join = [avg_worth_sent_coupon, median_worth_sent_coupon, min_worth_sent_coupon, max_worth_sent_coupon]
+    summary_worth_sent_coupons = join_tables(tables_to_join, ['member_id'])
+
+    # Merge all scores into one df
+    scores = scores.merge(total_utility_per_member, on='member_id', how='left').fillna(0)
+    scores = scores.merge(summary_worth_sent_coupons, on='member_id', how='left').fillna(0)
+
+    # Merge remaining member_ids and put to zero
     member_ids = pd.DataFrame(member_ids.values, columns=['member_id'])
     scores = pd.merge(member_ids, scores, 'left').fillna(0)
 
@@ -440,7 +511,7 @@ def calculate_member_scores(events_df, utility_df, member_ids):
 
 def calc_utility(utility_df, member_id, accepted_offers):
     utility_scores = list(map(lambda offer_id: utility_df.loc[member_id, offer_id], accepted_offers))
-    return np.sum(utility_scores)
+    return utility_scores
 
 
 def perform_sense_check(events_df, issues):
@@ -473,6 +544,7 @@ def perform_sense_check(events_df, issues):
 
     assert np.all(to_compare['amount_baseline'] == to_compare['nr_first_available'])
     diff = (to_compare['nr_accepted'] - to_compare['nr_accepted_baseline']).abs()
+    diff
     # print(np.sum(diff), np.sort(diff.fillna(0))[-10:])
 
 
