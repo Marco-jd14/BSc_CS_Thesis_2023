@@ -25,18 +25,20 @@ import database.connect_db as connect_db
 import database.query_db as query_db
 Event = query_db.Event
 
-pd.set_option('display.max_rows', 200)
+pd.set_option('display.max_rows', 10)
 pd.set_option('display.max_columns', 100)
 pd.set_option('display.width', 90)
 
 global_folder = './timelines/'
 run_folder = './timelines/run_%d/'
 
+SHOW_BASELINE = True
+
 def main():
 
     # baseline = pd.read_csv('./timelines/baseline_events.csv')
     # baseline.to_pickle('./timelines/baseline_events.pkl')
-    run_nrs_to_read = [3]
+    run_nrs_to_read = [4,6]
 
     TrackTime("Connect to db")
     conn = connect_db.establish_host_connection()
@@ -51,10 +53,11 @@ def main():
     # Read utility
     utility_df = pd.read_pickle(global_folder + "utility_df.pkl")
 
+
     # Read simulated events and info
     TrackTime("Get all run data")
     all_run_data = {}
-    RECOMPUTE = True
+    RECOMPUTE = False
     for run_nr in run_nrs_to_read:
         if RECOMPUTE or not os.path.exists(run_folder%run_nr + '%d_run_data.pkl'%run_nr):
             run_name, run_data = extract_relevant_info(run_nr, utility_df, members['id'], filtered_issues)
@@ -83,8 +86,8 @@ def main():
     TrackTime("Evaluate")
     evaluate_timelines(all_run_data, base_data, utility_df, members, filtered_issues['id'])
     TrackTime("Plots")
-    plot_utilities(all_run_data, base_data)
-    # plot_monthly_stats(all_run_data, base_data)
+    # plot_utilities(all_run_data, base_data)
+    plot_monthly_stats(all_run_data, base_data)
 
     db.close()
     TrackReport()
@@ -93,11 +96,12 @@ def main():
 def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
     contents = os.listdir(run_folder%run_nr)
     timeline_files = list(filter(lambda name: re.search("^%d.[0-9]+_events_df.pkl"%run_nr, name), contents))
-    timeline_nrs = list(map(lambda name: int(name.split('_')[0].split('.')[-1]), timeline_files))
+    timeline_nrs = sorted(list(map(lambda name: int(name.split('_')[0].split('.')[-1]), timeline_files)))
 
     member_utils_all_sims = None
     monthly_stats_all_sims = None
     for sim_nr in timeline_nrs:
+        print("\rSimulation %d"%sim_nr, end='\t\t')
         TrackTime("Read pickle")
         sim_events = pd.read_pickle(run_folder%run_nr + "%d.%d_events_df.pkl"%(run_nr, sim_nr))
         sim_events['event'] = sim_events['event'].apply(lambda event: Event[str(event)[len("Event."):]])
@@ -110,6 +114,7 @@ def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
         sim_info = extract_timeline_info(sim_events, utility_df, member_ids)
         member_utils, monthly_stats = sim_info
 
+        TrackTime("Combine timeline info")
         flat_values = monthly_stats.values.flatten('F')
         columns = pd.MultiIndex.from_product([monthly_stats.columns, list(monthly_stats.index)], names=['event', 'month'])
         flat_monthly_stats = pd.DataFrame([flat_values], columns=columns)
@@ -119,7 +124,7 @@ def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
         else:
             assert len(monthly_stats) == len(monthly_stats_all_sims[monthly_stats.columns[0]].columns)
             assert np.all(monthly_stats_all_sims.columns == flat_monthly_stats.columns)
-            monthly_stats_all_sims = pd.concat([monthly_stats_all_sims, flat_monthly_stats])
+            monthly_stats_all_sims = pd.concat([monthly_stats_all_sims, flat_monthly_stats], ignore_index=True)
         
         for event_name in monthly_stats.columns:
             for month in list(monthly_stats.index):
@@ -223,7 +228,6 @@ def make_monthly_summary(events):
         all_months_summaries[month] = monthly_summary
 
     all_months_summaries = pd.DataFrame.from_dict(all_months_summaries, orient='index')
-    # print(all_months_summaries)
     return all_months_summaries
 
 
@@ -296,6 +300,50 @@ def summarize_utility_distribution(member_utils_all_sims):
     return all_sim_summaries
 
 
+def plot_monthly_stats(all_run_data, base_data):
+    fig_names = ['timelines']
+    _, base_monthly_stats = base_data
+
+    colors = ['red', 'blue', 'yellow']
+    base_col = 'green'
+
+    for i, (run_name, run_data) in enumerate(all_run_data.items()):
+        _, monthly_stats_all_sims = run_data
+
+        interval_ends = list(map(lambda interval: interval.right, monthly_stats_all_sims['nr_accepted'].columns))
+
+        plt.figure('timelines', figsize=(10,10))
+        subplot_data_cols = ['nr_sent', 'nr_expired', 'nr_accepted']
+        for j, col_name in enumerate(subplot_data_cols, 1):
+            plt.subplot(2,2,j)
+            if i == 0 and SHOW_BASELINE:
+                plt.plot(interval_ends, base_monthly_stats[col_name], label='baseline', color=base_col)
+            nr_per_month_all_sims = monthly_stats_all_sims[col_name]
+            avg_per_month = nr_per_month_all_sims.mean()
+            std_dev_per_month = nr_per_month_all_sims.std()
+            # plt.plot(interval_ends, avg_per_month, label=run_name, color=colors[i])
+            plt.fill_between(interval_ends, avg_per_month - 2*std_dev_per_month, avg_per_month + 2*std_dev_per_month, label=run_name, color=colors[i], alpha=0.5)
+
+            if i == len(all_run_data)-1:
+                plt.legend()
+                plt.title(col_name)
+
+
+        plt.subplot(2,2,4)
+        if i == 0 and SHOW_BASELINE:
+            plt.plot(interval_ends, base_monthly_stats['nr_sent'] / base_monthly_stats['nr_accepted'], label='baseline', color=base_col)
+        pass_through_rate_all_sims = monthly_stats_all_sims['nr_sent'] / monthly_stats_all_sims['nr_accepted']
+        avg_PTR_per_month = pass_through_rate_all_sims.mean()
+        std_dev_PTR_per_month = pass_through_rate_all_sims.std()
+        # plt.plot(interval_ends, avg_PTR_per_month, label=run_name, color=colors[i])
+        plt.fill_between(interval_ends, avg_PTR_per_month - 2*std_dev_PTR_per_month, avg_PTR_per_month + 2*std_dev_PTR_per_month, label=run_name, color=colors[i], alpha=0.5)
+
+        if i == len(all_run_data)-1:
+            plt.legend()
+            plt.title('pass through rate')
+
+
+
 
 def plot_utilities(all_run_data, base_data):
     fig_names = ['avg_lorenz', 'sorted_utilities', 'nonzero_utilities_histogram']#, 'summary']
@@ -312,7 +360,7 @@ def plot_utilities(all_run_data, base_data):
 
         ####### Lorenz Curve Plot #############################
         plt.figure('avg_lorenz')
-        if i == 0:
+        if i == 0 and SHOW_BASELINE:
             equality = np.arange(len(member_utils_all_sims))/len(member_utils_all_sims)
             plt.plot(equality, 'k--', alpha=0.5, label='equality')
 
@@ -327,7 +375,7 @@ def plot_utilities(all_run_data, base_data):
 
         ####### Sorted Utilities Plot #############################
         plt.figure('sorted_utilities')
-        if i == 0:
+        if i == 0 and SHOW_BASELINE:
             plt.plot(np.sort(base_member_utils.values.reshape(-1)), label='baseline', color=base_col)
         plt.plot(np.sort(avg_utils), label=run_name, color=colors[i])
 
@@ -341,17 +389,18 @@ def plot_utilities(all_run_data, base_data):
             plt.hist(data, bins=12, alpha=0.5, color=colors[i], label=run_name, density=True)
 
             if i == len(all_run_data)-1:
-                # x_value = base_summary[col_name]
-                # xmin, xmax, ymin, ymax = plt.axis()
-                # plt.plot([x_value, x_value], [ymin, ymax], '-.', color=base_col, linewidth=5, label='baseline')
-                # plt.ylim([ymin, ymax])
+                # if SHOW_BASELINE:
+                #     x_value = base_summary[col_name]
+                #     xmin, xmax, ymin, ymax = plt.axis()
+                #     plt.plot([x_value, x_value], [ymin, ymax], '-.', color=base_col, linewidth=5, label='baseline')
+                #     plt.ylim([ymin, ymax])
                 plt.legend()
                 plt.title(col_name)
 
 
         ####### Utilities histogram #######################################
         plt.figure('nonzero_utilities_histogram')
-        if i == 0:
+        if i == 0 and SHOW_BASELINE:
             plt.hist(base_member_utils.values[base_member_utils.values>0], bins=30, alpha=0.5, color=base_col, label='baseline', density=True)
 
         flat_utils = member_utils_all_sims.values.reshape(-1)
