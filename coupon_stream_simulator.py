@@ -9,14 +9,11 @@ import os
 import re
 import sys
 import copy
-import enum
 import json
-import traceback
 import numpy as np
 import pandas as pd
 import datetime as dt
 from pprint import pprint
-from collections import Counter
 import matplotlib.pyplot as plt
 from database.lib.tracktime import TrackTime, TrackReport
 
@@ -40,7 +37,7 @@ def main():
     db   = connect_db.establish_database_connection(conn)
     print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
 
-    # convert_events_pkl_to_excel(19,0)
+    # convert_events_pkl_to_excel(21,0)
     # sys.exit()
 
     util_prep, data_prep = prepare_simulation_data(db)
@@ -59,7 +56,10 @@ def run_experiment(data_prep, util_prep, BATCH_SIZE, ALLOCATOR_ALGORITHM, NR_SIM
     run_nr = max(list(map(lambda folder_name: int(folder_name.split("_")[-1]), run_folders))) + 1 if len(run_folders) > 0 else 1
 
     run_info = {'batch_size': BATCH_SIZE,
-                'allocator_algorithm': ALLOCATOR_ALGORITHM}
+                'allocator_algorithm': ALLOCATOR_ALGORITHM,
+                'version_info': 'new updated utility_df',
+                'version_tag': 'utility_df',
+                'utility_type': 'partial_historical_context'}
     export_run_info(*util_prep, run_info, run_nr)
 
 
@@ -403,7 +403,8 @@ def simulate_member_responses(batch_utility, member_indices, coupon_indices, cou
     TrackTime("Simulating non-accepted coupons")
     # Simulate if coupon will be declined or no response (expire)
     P_let_expire_given_not_accepted, valid_decline_times = distribution_info
-    P_let_expire = P_let_expire_given_not_accepted  # TODO: improve upon P_let_expire --> member dependent?
+    # TODO: improve upon P_let_expire --> member dependent?
+    P_let_expire = P_let_expire_given_not_accepted
     coupon_let_expire = np.random.uniform(0, 1, size=np.sum(~coupon_accepted)) < P_let_expire
 
     # Draw from realistic decline times
@@ -668,7 +669,7 @@ def prepare_simulation_data(db):
                               'family_criteria_is_single', 'family_criteria_has_children']
     filtered_offers = copy.copy(filtered_offers[relevant_offer_columns])
 
-    # TODO: 'receive_coupon_after', 'deactivated_at', 'archived_at', 'onboarded_at', 'created_at'
+    # TODO: low-priority --> 'receive_coupon_after', 'deactivated_at', 'archived_at', 'onboarded_at', 'created_at'
     relevant_member_columns = ['id', 'active', 'member_state', 'email', 'mobile', 'date_of_birth', 'gender']
     all_members = all_members[relevant_member_columns]
 
@@ -707,8 +708,10 @@ def prepare_simulation_data(db):
     # print("Avg percentage of decline time needed: ", valid_decline_times.mean())
     # print("Median percentage of decline time needed: ", valid_decline_times.median())
     # plt.hist(valid_decline_times, bins=50)
+    # plt.title("Distribution of needed decline time as fraction of total given time")
     # plt.show()
     distribution_info = (P_let_expire_given_not_accepted, valid_decline_times.values.reshape(-1))
+
 
     utility_values, utility_indices = get_utility(all_members['id'], filtered_offers['id'], filtered_coupons)
 
@@ -716,6 +719,107 @@ def prepare_simulation_data(db):
     data_prep = (filtered_issues, all_members, supporting_info, distribution_info)
     return util_prep, data_prep
 
+
+def get_utility(member_ids=None, offer_ids=None, filtered_coupons=None):
+    if member_ids is None or offer_ids is None or filtered_coupons is None:
+        utility_df = pd.read_pickle(global_folder + "utility_df.pkl")
+    else:
+        utility_df = make_utility(member_ids, offer_ids, filtered_coupons)
+
+
+    member_indices = np.arange(utility_df.shape[0])
+    member_id_to_index = {utility_df.index[member_index]: member_index for member_index in member_indices}
+
+    offer_indices = np.arange(utility_df.shape[1])
+    offer_id_to_index = {utility_df.columns[offer_index]: offer_index for offer_index in offer_indices}
+
+    utility_values = utility_df.values
+    utility_indices = (member_id_to_index, offer_id_to_index)
+    return utility_values, utility_indices
+
+
+def make_utility(member_ids, offer_ids, filtered_coupons):
+
+    member_scores = filtered_coupons[['member_id','member_response','id']].pivot_table(index=['member_id'], columns='member_response', aggfunc='count', fill_value=0)['id'].reset_index()
+    offer_scores  = filtered_coupons[['offer_id','member_response','id']].pivot_table(index=['offer_id'], columns='member_response', aggfunc='count', fill_value=0)['id'].reset_index()
+    member_scores.columns = [member_scores.columns[0]] + list(map(lambda event: "nr_" + "_".join(str(event).split('_')[1:]), member_scores.columns[1:]))
+    offer_scores.columns  = [offer_scores.columns[0]] + list(map(lambda event: "nr_" + "_".join(str(event).split('_')[1:]), offer_scores.columns[1:]))
+
+    # Adjustments To make sure no probabilities are exactly 1 or 0
+    member_scores['nr_accepted'] += 1
+    member_scores['nr_declined'] += 1
+    offer_scores['nr_accepted'] += 1
+    offer_scores['nr_declined'] += 1
+
+    # Calculate per member the probability of accepting
+    P_accept_members = member_scores['nr_accepted'] / (member_scores['nr_accepted'] + member_scores['nr_declined'] + member_scores['nr_let_expire'])
+    P_accept_members.index = member_scores['member_id']
+    # If a member has never received any coupon, assume the average P_accept
+    remaining_members = set(member_ids) - set(member_scores['member_id'])
+    P_remaining_members = pd.DataFrame([P_accept_members.mean()] * len(remaining_members), index=list(remaining_members))
+    # Put all probabilities together
+    if not P_remaining_members.empty:
+        P_accept_members = pd.concat([P_accept_members, P_remaining_members])
+    assert len(set(P_accept_members.index)) == len(member_ids)
+
+    # Calculate per offer the probability of accepting
+    P_accept_offers = offer_scores['nr_accepted'] / (offer_scores['nr_accepted'] + offer_scores['nr_declined'] + offer_scores['nr_let_expire'])
+    P_accept_offers.index = offer_scores['offer_id']
+    # If an offer has never been sent to any member, assume the average P_accept
+    remaining_offers = set(offer_ids) - set(offer_scores['offer_id'])
+    P_remaining_offers = pd.DataFrame([P_accept_offers.mean()] * len(remaining_offers), index=list(remaining_offers))
+    # Put all probabilities together
+    if not P_remaining_offers.empty:
+        P_accept_offers = pd.concat([P_accept_offers, P_remaining_offers])
+    assert len(set(P_accept_offers.index)) == len(offer_ids)
+
+    # Matrix-multiply all probabilities to generate the matrix
+    utility_matrix = P_accept_members.values.reshape(-1,1) @ P_accept_offers.values.reshape(1,-1)
+    utility_df = pd.DataFrame(utility_matrix, columns=P_accept_offers.index, index=P_accept_members.index)
+
+    # To be able to make adjustments to utility based on whether the member has accepted or declined a specific offer
+    zero_matrix = pd.DataFrame(np.zeros(utility_df.values.shape, dtype=int), columns=utility_df.columns, index=utility_df.index)
+
+    accepted_coupons = filtered_coupons[filtered_coupons['member_response'] == Event.member_accepted]
+    offer_per_member = accepted_coupons[['member_id','offer_id','id']].pivot_table(index=['member_id'], columns='offer_id', aggfunc='count', fill_value=0)['id']#.reset_index()
+    offer_per_member = (zero_matrix + offer_per_member).fillna(0)
+    member_accepted_offer = offer_per_member>0
+
+    declined_coupons = filtered_coupons[filtered_coupons['member_response'] == Event.member_declined]
+    offer_per_member = declined_coupons[['member_id','offer_id','id']].pivot_table(index=['member_id'], columns='offer_id', aggfunc='count', fill_value=0)['id']#.reset_index()
+    offer_per_member = (zero_matrix + offer_per_member).fillna(0)
+    member_declined_offer = offer_per_member>0
+
+    let_expire_coupons = filtered_coupons[filtered_coupons['member_response'] == Event.member_let_expire]
+    avg_P_accept = len(accepted_coupons) / (len(accepted_coupons) + len(declined_coupons) + len(let_expire_coupons))
+
+    # Make adjustments to utility based on whether the member has accepted or declined a specific offer
+    utility_df = utility_df + 0.1*member_accepted_offer
+    utility_df[utility_df>=1] -= 0.1
+    utility_df = utility_df - 0.1*member_declined_offer
+    utility_df[utility_df<=0] += 0.1
+    assert np.all(utility_df.values < 1) and np.all(utility_df.values > 0)
+
+    ratio = np.log(avg_P_accept) / np.log(np.average(utility_df.values))
+    utility_df = np.power(utility_df, ratio)
+
+    plt.figure()
+    plt.hist(utility_df.values.reshape(-1), bins=30, density=False)
+    plt.xlabel("P_accept")
+    plt.ylabel("Frequency")
+    plt.title("Distribution of P_accept")
+    plt.show()
+    # print(utility_df.shape)
+
+    # utility_values, (member_id_to_index, offer_id_to_index) = get_utility()
+    # utility_df = pd.DataFrame(utility_values, columns=offer_id_to_index, index=member_id_to_index)
+    # print(utility_df.shape)
+    # print(utility_df)
+    # plt.figure()
+    # plt.hist(utility_df.values.reshape(-1), bins=30, density=True)
+
+
+    return utility_df
 
 
 
