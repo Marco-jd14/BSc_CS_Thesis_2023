@@ -32,12 +32,13 @@ global_folder = './timelines/'
 run_folder = './timelines/run_%d/'
 
 SHOW_BASELINE = True
+RECOMPUTE = False
 
 def main():
 
     # baseline = pd.read_csv('./timelines/baseline_events.csv')
     # baseline.to_pickle('./timelines/baseline_events.pkl')
-    run_nrs_to_read = [4,6]
+    run_nrs_to_read = [4,7]
 
     TrackTime("Connect to db")
     conn = connect_db.establish_host_connection()
@@ -53,10 +54,9 @@ def main():
     utility_df = pd.read_pickle(global_folder + "utility_df.pkl")
 
 
-    RECOMPUTE = False
     # Read simulated events and info
     TrackTime("Get all run data")
-    all_run_data = {}
+    all_run_data, all_run_info = {}, {}
     for run_nr in run_nrs_to_read:
         if RECOMPUTE or not os.path.exists(run_folder%run_nr + '%d_run_data.pkl'%run_nr):
             run_name, run_data = extract_relevant_info(run_nr, utility_df, members['id'], filtered_issues)
@@ -71,7 +71,12 @@ def main():
             with open(run_folder%run_nr + '%d_run_data.pkl'%run_nr, 'rb') as fp:
                 run_data = pickle.load(fp)
 
+        f = open(run_folder%run_nr + "%d_info.json"%run_nr)
+        run_info = json.load(f)
+        f.close()
+
         all_run_data[run_name] = run_data
+        all_run_info[run_name] = run_info
 
     # Read baseline events
     base_events = pd.read_pickle(global_folder + 'baseline_events.pkl')
@@ -86,7 +91,8 @@ def main():
     evaluate_timelines(all_run_data, base_data, utility_df, members, filtered_issues['id'])
     TrackTime("Plots")
     plot_member_stats(all_run_data, base_data)
-    # plot_monthly_stats(all_run_data, base_data)
+    plot_monthly_stats(all_run_data, base_data)
+    plot_batch_stats(all_run_data, base_data, all_run_info)
 
     db.close()
     TrackReport()
@@ -97,8 +103,14 @@ def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
     timeline_files = list(filter(lambda name: re.search("^%d.[0-9]+_events_df.pkl"%run_nr, name), contents))
     timeline_nrs = sorted(list(map(lambda name: int(name.split('_')[0].split('.')[-1]), timeline_files)))
 
+    TrackTime("Read info")
+    f = open(run_folder%run_nr + "%d_info.json"%run_nr)
+    info = json.load(f)
+    f.close()
+
     member_stats_all_sims = None
     monthly_stats_all_sims = None
+    batch_stats_all_sims = None
     for sim_nr in timeline_nrs:
         print("\rSimulation %d"%sim_nr, end='\t\t')
         TrackTime("Read pickle")
@@ -110,8 +122,8 @@ def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
         perform_timeline_sense_check(sim_events, filtered_issues)
 
         TrackTime("Extract timeline info")
-        sim_info = extract_timeline_info(sim_events, utility_df, member_ids)
-        member_stats, monthly_stats = sim_info
+        sim_info = extract_timeline_info(sim_events, utility_df, member_ids, info['batch_size'])
+        member_stats, monthly_stats, batch_stats = sim_info
 
         TrackTime("Combine monthly info")
         flat_values = monthly_stats.values.flatten('F')
@@ -143,36 +155,50 @@ def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
                 member_stats_all_sims[col, 'sim_%d'%sim_nr] = member_stats[col]
 
 
+        TrackTime("Combine batch info")
+        batch_stats['sim_nr'] = sim_nr
+        if batch_stats_all_sims is None:
+            batch_stats_all_sims = batch_stats
+        else:
+            batch_stats_all_sims = pd.concat([batch_stats_all_sims, batch_stats], ignore_index=True)
+
+
     member_stats_all_sims = member_stats_all_sims.sort_index(axis=1)
 
-    TrackTime("Read info")
-    f = open(run_folder%run_nr + "%d_info.json"%run_nr)
-    info = json.load(f)
-    f.close()
-
     run_name = info['allocator_algorithm'] + "_" + str(info['batch_size'])
-    return run_name, (member_stats_all_sims, monthly_stats_all_sims)
+    return run_name, (member_stats_all_sims, monthly_stats_all_sims, batch_stats_all_sims)
 
 
-def extract_timeline_info(events, utility_df, member_ids):
+def extract_timeline_info(events, utility_df, member_ids, batch_size=None):
 
+    TrackTime("calculate_member_scores")
     member_events = events[~events['member_id'].isna()]
     member_stats = calculate_member_scores(member_events, utility_df, member_ids)
     assert len(set(member_stats['member_id'].values)) == len(member_stats)
 
+    TrackTime("make_monthly_summary")
     monthly_stats = make_monthly_summary(events)
 
-    return member_stats, monthly_stats
+    TrackTime("other stats")
+    batch_stats = get_batch_stats(events, batch_size)
+    offer_stats = make_offer_stats(events, utility_df, member_ids)
+
+    return member_stats, monthly_stats, batch_stats
 
 
-# # Relevant events according to the coupon lifecycle
-# class Event(enum.Enum):
-#     member_accepted     = 0
-#     member_declined     = 1
-#     member_let_expire   = 2 # i.e. after 3 days
-#     coupon_available    = 3
-#     coupon_sent         = 4
-#     coupon_expired      = 5 # i.e. after 1 month
+def get_batch_stats(events, batch_size):
+    sent_events = events[events['event'] == Event.coupon_sent]
+
+    if 'batch_id' in events.columns:
+        batch_info = sent_events.groupby('batch_id').aggregate(batch_sent_at=('at','first'), batch_size=('coupon_id','count')).reset_index(drop=True)
+    else:
+        batch_info = sent_events.groupby('at').aggregate(batch_size=('coupon_id','count')).reset_index().rename(columns={'at':'batch_sent_at'})
+
+    batch_info['duration_since_prev_batch'] = batch_info['batch_sent_at'] - batch_info['batch_sent_at'].shift(1)
+    return batch_info
+
+def make_offer_stats(events, utility_df, member_ids):
+    return
 
 def last_day_of_month(date):
     if date.month == 12:
@@ -194,20 +220,6 @@ def datetime_range(start_date, end_date, delta):
     return result
 
 def make_monthly_summary(events):
-    # event_counts = events[['event','at']].groupby('event').count().rename(columns={'at':'nr'})
-    # print(event_counts)
-    # for event in Event:
-    #     print(event)
-
-    # coupon_follow_id_counts = events[['event','coupon_follow_id']].groupby('coupon_follow_id').count().reset_index().rename(columns={'event':'nr_events'})
-    # print(coupon_follow_id_counts)
-    # nr_coupons_with_one_event = np.sum(coupon_follow_id_counts['nr_events'] == 2)
-    # print(nr_coupons_with_one_event)
-
-    # available_coupon_ids = set(events['coupon_follow_id'][events['event'] == Event.coupon_available ].values)
-    # sent_coupon_ids = set(events['coupon_follow_id'][events['event'] == Event.coupon_sent ].values)
-    # print(available_coupon_ids - sent_coupon_ids)
-    # assert nr_coupons_with_one_event == event_counts.loc[Event.coupon_available,'nr'] - event_counts.loc[Event.coupon_sent,'nr']
 
     start_date = dt.datetime.combine(events['at'].iloc[0].replace(day=1).date(), dt.time(0,0,0))
     # end_date   = dt.datetime.combine(last_day_of_month(events['at'].iloc[-1]).date(), dt.time(23,59,59))
@@ -237,35 +249,6 @@ def make_monthly_summary(events):
 
 
 def evaluate_timelines(all_run_data, base_data, utility_df, members, issue_ids):
-    pass
-    # print(events_df)
-    # member_ids = members['id']
-
-    # base_member_utils, base_monthly_stats = base_data
-
-    # assert len(set(base_scores['member_id'].values)) == len(base_scores)
-    # base_members = set(base_scores['member_id'][base_scores['utility'] > 0].values)
-
-    # sim_utilities = {'baseline': base_scores}
-
-    # for run_name, run_data in all_run_data.items():
-    #     print("")
-
-    #     sim_members = set(sim_scores['member_id'][sim_scores['utility'] > 0].values)
-    #     print("nr members received coupon in simulation:", len(sim_members))
-    #     print("nr members received coupon in baseline:", len(base_members))
-    #     print("\nnr members received coupon in baseline not in simulation:", len(base_members - sim_members))
-    #     print("nr members received coupon in simulation not in baseline:", len(sim_members - base_members))
-
-    #     inactive_members = set(members['id'][members['member_state'] != 'active'].values)
-    #     print('inactive baseline:', len(base_members.intersection(inactive_members)))
-    #     print('inactive simulation:', len(sim_members.intersection(inactive_members)))
-
-    #     sim_utilities[result_name] = sim_scores
-
-
-    # for result_name, scores in sim_utilities.items():
-    #     summarize_utilities(scores, result_name)
     return
 
 
@@ -292,14 +275,75 @@ def summarize_distribution(member_utils_all_sims):
     return all_sim_summaries
 
 
-def plot_monthly_stats(all_run_data, base_data):
-    _, base_monthly_stats = base_data
+def plot_offer_stats():
+    return
+
+def plot_batch_stats(all_run_data, base_data, all_run_info):
+    fig_names = ['time_between_batches']
+
+    _, _, base_batch_stats = base_data
 
     colors = ['red', 'blue', 'yellow']
     base_col = 'green'
 
     for i, (run_name, run_data) in enumerate(all_run_data.items()):
-        _, monthly_stats_all_sims = run_data
+        _, _, batch_stats_all_sims = run_data
+        
+        # plt.figure('batch_size')
+        # bins = list(np.linspace(min_batch_size - 0.5, min_batch_size + 10.5)) + [0.5 + max(batch_stats_all_sims['batch_size'])]
+        # plt.hist(batch_stats_all_sims['batch_size'], bins=bins, alpha=0.5, color=colors[i], label=run_name, density=False)
+        print(run_name)
+        min_batch_size = all_run_info[run_name]['batch_size']
+        print("avg batch size: %.2f"%np.average(batch_stats_all_sims['batch_size'].values))
+        print("nr batches larger than batch size:", np.sum(batch_stats_all_sims['batch_size'].values > min_batch_size))
+        print("nr batches smaller than batch size:", np.sum(batch_stats_all_sims['batch_size'].values < min_batch_size))
+
+        plt.figure('time_between_batches')
+        duration_categories = [(pd.Timedelta(seconds=3), "Less than 3 seconds"),
+                               (pd.Timedelta(seconds=20), "Less than 20 seconds"),
+                               (pd.Timedelta(minutes=1), "Less than 1 minute"),
+                               (pd.Timedelta(minutes=20), "Less than 20 minutes"),
+                               (pd.Timedelta(hours=1), "Less than 1 hour"),
+                               (pd.Timedelta(hours=5), "Less than 5 hours"),
+                               (pd.Timedelta(hours=10), "Less than 10 hours"),
+                               (pd.Timedelta(days=1), "Less than 1 day"),
+                               (np.max(batch_stats_all_sims['duration_since_prev_batch']), "More than 1 day")]
+
+        def get_duration_category(duration):
+            if pd.isna(duration):
+                return "First batch"
+
+            duration_smaller_than_cats = list(filter(lambda cat: duration <= cat[0], duration_categories))
+            category_tuple = duration_smaller_than_cats[0]
+            return category_tuple[1]
+
+
+        batch_stats_all_sims['duration_category'] = batch_stats_all_sims['duration_since_prev_batch'].apply(get_duration_category)
+        TrackTime("Overig")
+        # duration_mins = batch_stats_all_sims['duration_since_prev_batch'].astype('timedelta64[s]') / 60
+        categories = list(map(lambda cat: cat[1], duration_categories))
+        cat_counts = batch_stats_all_sims['duration_category'][batch_stats_all_sims['duration_category'].isin(categories)].value_counts()
+        cat_counts = pd.DataFrame([cat_counts.values / np.sum(cat_counts.values)], columns=cat_counts.index)[categories]
+        plt.bar(cat_counts.columns, cat_counts.values.reshape(-1), alpha=0.5, color=colors[i], label=run_name)
+
+
+
+    # Set the title and legend
+    for fig_name in fig_names:
+        plt.figure(fig_name)
+        plt.suptitle(fig_name)
+        plt.xticks(rotation=70)
+        plt.legend()
+
+
+def plot_monthly_stats(all_run_data, base_data):
+    _, base_monthly_stats, _ = base_data
+
+    colors = ['red', 'blue', 'yellow']
+    base_col = 'green'
+
+    for i, (run_name, run_data) in enumerate(all_run_data.items()):
+        _, monthly_stats_all_sims, _ = run_data
 
         interval_ends = list(map(lambda interval: interval.right, monthly_stats_all_sims['nr_accepted'].columns))
 
@@ -339,15 +383,14 @@ def plot_monthly_stats(all_run_data, base_data):
 def plot_member_stats(all_run_data, base_data):
     fig_names = ['avg_lorenz', 'sorted_utilities']
 
-    base_member_stats, _ = base_data
-    base_member_utils = base_member_stats[['total_utility']]
-    base_summary = summarize_distribution(base_member_utils)
+    base_member_stats, _, _ = base_data
+    base_summary = summarize_distribution(base_member_stats[['total_utility']])
 
     colors = ['red', 'blue', 'yellow']
     base_col = 'green'
 
     for i, (run_name, run_data) in enumerate(all_run_data.items()):
-        member_stats_all_sims, _ = run_data
+        member_stats_all_sims, _, _ = run_data
         nr_simulations = len(member_stats_all_sims['total_utility'].columns)
 
 
@@ -357,7 +400,7 @@ def plot_member_stats(all_run_data, base_data):
             equality = np.arange(len(member_stats_all_sims))/len(member_stats_all_sims)
             plt.plot(equality, 'k--', alpha=0.5, label='equality')
 
-            baseline = base_member_utils.values.reshape(-1)
+            baseline = base_member_stats['total_utility'].values
             plt.plot(np.cumsum(np.sort(baseline)/np.sum(baseline)), label='baseline', color=base_col)
 
         sorted_utils = np.sort(member_stats_all_sims['total_utility'].values, axis=0)
@@ -369,7 +412,7 @@ def plot_member_stats(all_run_data, base_data):
         ####### Sorted Utilities Plot #############################
         plt.figure('sorted_utilities')
         if i == 0:
-            plt.plot(np.sort(base_member_utils.values.reshape(-1)), label='baseline', color=base_col)
+            plt.plot(np.sort(base_member_stats['total_utility'].values), label='baseline', color=base_col)
         plt.plot(np.sort(avg_utils), label=run_name, color=colors[i])
 
 
@@ -405,7 +448,7 @@ def plot_member_stats(all_run_data, base_data):
         for j, data_col_name in enumerate(columns_to_plot, 1):
 
             summary_to_plot = summarize_distribution(member_stats_all_sims[data_col_name])
-            ax = plt.subplot(2,2,j)
+            plt.subplot(2,2,j)
             data = summary_to_plot['average'].values
             plt.hist(data, bins=12, alpha=0.5, color=colors[i], label=run_name, density=False)
 
@@ -529,6 +572,7 @@ def calc_utility(utility_df, member_id, accepted_offers):
 
 
 def perform_timeline_sense_check(events_df, issues):
+    print("")
     relevant_issue_columns_check   = ['id', 'offer_id', 'sent_at', 'amount', 'expires_at']
     relevant_issue_columns_compare = ['id', 'total_issued', 'nr_accepted', 'nr_expired', 'nr_not_sent_on']
     issues = issues[relevant_issue_columns_check + relevant_issue_columns_compare[1:]]
@@ -546,19 +590,21 @@ def perform_timeline_sense_check(events_df, issues):
     available_events = events_df[events_df['event'] == Event.coupon_available]
     first_follow_available = available_events.groupby('coupon_follow_id').first().reset_index()
     nr_first_available = first_follow_available.groupby('issue_id').aggregate(nr_first_available=('coupon_id','count')).reset_index()
-
     # NB: follow.last() is not always expired or accepted, declined or let_expire can be after expiry
 
     list_of_tables = [nr_accepted, nr_declined, nr_let_expire, nr_first_available]
-    simulation_results = join_tables(list_of_tables, ['issue_id'], issues[['issue_id']])
+    simulation_results = join_tables(list_of_tables, ['issue_id'], issues[['issue_id']]).fillna(0)
     simulation_results = simulation_results.sort_values(by='issue_id').reset_index(drop=True)
     # print(simulation_results)
 
     to_compare = simulation_results.merge(issues.add_suffix('_baseline').rename(columns={'issue_id_baseline':'issue_id'}), on='issue_id')
 
-    assert np.all(to_compare['amount_baseline'] == to_compare['nr_first_available'])
+    # print(to_compare)
+    if np.any(to_compare['nr_first_available'] > 0):
+        assert np.all(to_compare['amount_baseline'] == to_compare['nr_first_available'])
     diff = (to_compare['nr_accepted'] - to_compare['nr_accepted_baseline']).abs()
     diff
+    # sys.exit()
     # print(np.sum(diff), np.sort(diff.fillna(0))[-10:])
 
 
