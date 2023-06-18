@@ -21,32 +21,56 @@ def greedy(Uar, verbose=False):
     nr_eligible_options = np.prod(Uar.shape) - nr_non_eligible_members
 
     # sort the utility-matrix with highest utility first
-    rows, cols = np.unravel_index(np.flip(np.argsort(Uar, axis=None)), Uar.shape)
-    for i, (a, r) in enumerate(zip(rows,cols)):
+    row_indices, col_indices = np.unravel_index(np.flip(np.argsort(Uar, axis=None)), Uar.shape)
+
+    row_list, col_list = [], []
+    for i, (a, r) in enumerate(zip(row_indices, col_indices)):
         if i >= nr_eligible_options:
             # Do not allocate coupons when utilities are negative (aka members not eligible)
             if verbose: print("Not all resources could be allocated after %d iterations"%i)
-            return Xar
+            break
 
-        nr_members_assigned_to_resource = np.sum(Xar, axis=0)
-        if np.all(nr_members_assigned_to_resource > 0):
+        if len(col_list) == nr_R:
             if verbose: print("All resources allocated after %d iterations"%i)
-            return Xar # Every resource is already allocated
+            break # Every resource is already allocated
 
-        nr_resources_allocated_to_members = np.sum(Xar, axis=1)
-        if np.all(nr_resources_allocated_to_members > 0):
+        if len(row_list) == nr_A:
             if verbose: print("All members have a resource after %d iterations"%i)
-            return Xar # Every member already as a resource
+            break # Every member already as a resource
 
-        if nr_members_assigned_to_resource[r] > 0:
+        if a in row_list or r in col_list:
             continue
+        else:
+            row_list.append(a)
+            col_list.append(r)
 
-        if nr_resources_allocated_to_members[a] == 0:
-            Xar[a,r] = 1
+    Xar[row_list, col_list] = 1
 
-    if verbose: print("Last coupon allocated on last iteration")
-    assert i == np.prod(Uar.shape) - 1, "iteration %d != %d (shape=%s)"%(i, np.prod(Uar.shape) - 1, str(Uar.shape))
-    assert np.all(np.sum(Xar, axis=0) > 0) or np.all(np.sum(Xar, axis=1) > 0), "Not all resources allocated and not all members got a resource"
+    # for i, (a, r) in enumerate(zip(row_indices, col_indices)):
+    #     if i >= nr_eligible_options:
+    #         # Do not allocate coupons when utilities are negative (aka members not eligible)
+    #         if verbose: print("Not all resources could be allocated after %d iterations"%i)
+    #         return Xar
+
+    #     nr_members_assigned_to_resource = np.sum(Xar, axis=0)
+    #     if np.all(nr_members_assigned_to_resource > 0):
+    #         if verbose: print("All resources allocated after %d iterations"%i)
+    #         return Xar # Every resource is already allocated
+
+    #     nr_resources_allocated_to_members = np.sum(Xar, axis=1)
+    #     if np.all(nr_resources_allocated_to_members > 0):
+    #         if verbose: print("All members have a resource after %d iterations"%i)
+    #         return Xar # Every member already as a resource
+
+    #     if nr_members_assigned_to_resource[r] > 0:
+    #         continue
+
+    #     if nr_resources_allocated_to_members[a] == 0:
+    #         Xar[a,r] = 1
+
+    # if verbose: print("Last coupon allocated on last iteration")
+    # assert i == np.prod(Uar.shape) - 1, "iteration %d != %d (shape=%s)"%(i, np.prod(Uar.shape) - 1, str(Uar.shape))
+    # assert np.all(np.sum(Xar, axis=0) > 0) or np.all(np.sum(Xar, axis=1) > 0), "Not all resources allocated and not all members got a resource"
     return Xar
 
 
@@ -133,3 +157,15 @@ def _convert_vars_to_value(Xar):
                 pass
             assert Xar[i,j] == 0 or Xar[i,j] == 1, "Decision variable is not boolean? '%s'"%str(Xar[i,j])
     return Xar.astype(int)
+
+
+def main():
+    np.random.seed(0)
+    nr_agents = 10
+    nr_unique_resources = 5
+    Uar = np.random.uniform(0,0.7,size=(nr_agents, nr_unique_resources))
+    X_a_r = greedy(Uar, verbose=True)
+    print(X_a_r)
+
+if __name__ == '__main__':
+    main()
