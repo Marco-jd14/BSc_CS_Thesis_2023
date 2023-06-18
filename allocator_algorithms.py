@@ -45,47 +45,23 @@ def greedy(Uar, verbose=False):
             col_list.append(r)
 
     Xar[row_list, col_list] = 1
-
-    # for i, (a, r) in enumerate(zip(row_indices, col_indices)):
-    #     if i >= nr_eligible_options:
-    #         # Do not allocate coupons when utilities are negative (aka members not eligible)
-    #         if verbose: print("Not all resources could be allocated after %d iterations"%i)
-    #         return Xar
-
-    #     nr_members_assigned_to_resource = np.sum(Xar, axis=0)
-    #     if np.all(nr_members_assigned_to_resource > 0):
-    #         if verbose: print("All resources allocated after %d iterations"%i)
-    #         return Xar # Every resource is already allocated
-
-    #     nr_resources_allocated_to_members = np.sum(Xar, axis=1)
-    #     if np.all(nr_resources_allocated_to_members > 0):
-    #         if verbose: print("All members have a resource after %d iterations"%i)
-    #         return Xar # Every member already as a resource
-
-    #     if nr_members_assigned_to_resource[r] > 0:
-    #         continue
-
-    #     if nr_resources_allocated_to_members[a] == 0:
-    #         Xar[a,r] = 1
-
-    # if verbose: print("Last coupon allocated on last iteration")
-    # assert i == np.prod(Uar.shape) - 1, "iteration %d != %d (shape=%s)"%(i, np.prod(Uar.shape) - 1, str(Uar.shape))
-    # assert np.all(np.sum(Xar, axis=0) > 0) or np.all(np.sum(Xar, axis=1) > 0), "Not all resources allocated and not all members got a resource"
     return Xar
 
 
 
 
-def max_utility(Uar, verbose=False, min_utility=-1):
-    model = LpProblem(name="max_utilty", sense=LpMaximize)
+def max_sum_utility(Uar, verbose=False, min_utility=0):
+    model = LpProblem(name="max_sum_utility", sense=LpMaximize)
     nr_A, nr_R = Uar.shape
 
     if nr_A < nr_R:
         if verbose: print("\nLess eligible members than resources: %d < %d"%(nr_A,nr_R))
 
+
+
+    ##### Defining the variables ####################################
     Xar = [["" for r in range(Uar.shape[-1])] for a in range(Uar.shape[0])]
 
-    # Define the variables
     for a in range(nr_A):
         for r in range(nr_R):
             Xar[a][r] = LpVariable(name="x_%d,%d"%(a,r),cat="Binary")
@@ -93,21 +69,20 @@ def max_utility(Uar, verbose=False, min_utility=-1):
     assert Uar.shape == Xar.shape
 
     # Ensure ineligible utilities do not get allocated
-    Xar[Uar <= min_utility] = 0
+    Xar[Uar < min_utility] = 0
 
-    # Make the objective function (utilitarian)
+
+    ###### Objective Function ########################################
     obj_function = lpSum(Uar * Xar)
     model += obj_function
 
-    # Add constraints
+
+    ###### Constraints ##############################################
     # each agent...
     for a in range(nr_A):
-        # ... gets at most 1 resource ...
+        # ... gets at most 1 resource (but can also get 0 resources)
         constraint_max = lpSum(Xar[a,:]) <= 1
-        # ... but can also get 0 resources
-        constraint_min = lpSum(Xar[a,:]) >= 0 # Can be left out (implied by binary nature of decision variables)
         model += (constraint_max, "Agent %d max 1 resource"%a)
-        model += (constraint_min, "Agent %d min 0 resources"%a)
 
     # each resource...
     for r in range(nr_R):
@@ -115,13 +90,15 @@ def max_utility(Uar, verbose=False, min_utility=-1):
         constraint = lpSum(Xar[:,r]) <= 1
         model += (constraint, "Resource %d allocated to at most 1 agent"%r)
 
-    # Solve the model
+
+    ####### Solve the model #########################################
     start = dt.datetime.now()
     if verbose: print(start.time())
     model.solve()
     if verbose: print(dt.datetime.now() - start)
 
-    # Print the results
+
+    ####### Results ##################################################
     if model.status != 1:
         print(LpStatus[model.status])
         return
@@ -155,8 +132,13 @@ def _convert_vars_to_value(Xar):
                 Xar[i,j] = element.value()
             except:
                 pass
-            assert Xar[i,j] == 0 or Xar[i,j] == 1, "Decision variable is not boolean? '%s'"%str(Xar[i,j])
+    assert np.all(np.logical_or(Xar == 0, Xar == 1)), "Decision variable is not boolean?"
     return Xar.astype(int)
+
+
+
+
+
 
 
 def main():
@@ -164,8 +146,20 @@ def main():
     nr_agents = 10
     nr_unique_resources = 5
     Uar = np.random.uniform(0,0.7,size=(nr_agents, nr_unique_resources))
-    X_a_r = greedy(Uar, verbose=True)
-    print(X_a_r)
+
+    Uar = [[  -1,  -1,  -1, 0.7,  -1],
+           [  -1,  -1,  -1, 0.7,  -1],
+           [ 0.1, 0.2, 0.3,  -1, 0.7],
+           [0.15,0.25,0.35,  -1, 0.7]]
+    Uar = np.array(Uar)
+    print(Uar)
+
+    # X_a_r = greedy(Uar, verbose=True)
+    # print("\n", X_a_r, "\n")
+    # X_a_r = max_sum_utility(Uar, verbose=True)
+    # print("\n", X_a_r, "\n")
+    X_a_r = maximin_utility(Uar, verbose=True)
+    print("\n", X_a_r, "\n")
 
 if __name__ == '__main__':
     main()

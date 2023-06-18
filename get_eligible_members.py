@@ -369,56 +369,5 @@ def get_eligible_members_static(eligible_members, matching_context, all_partners
 
 
 
-
-
-
-def get_eligible_members_basic(db, verbose=False):
-    TrackTime("Retrieve member table")
-    query = "select * from member"
-    all_members = pd.read_sql_query(query, db)
-    if verbose: print("nr all_members:", len(all_members))
-
-    TrackTime("eligible basic")
-    # email and phone number criteria
-    members_with_email    = all_members[~all_members['email'].isna()]
-    members_with_phone_nr = members_with_email[~members_with_email['mobile'].isna()]
-
-    # member must be active to be eligible
-    active_members = members_with_phone_nr[members_with_phone_nr['active'] == 1]
-    assert np.all(active_members['member_state'] == 'active')
-    if verbose: print("nr active_members:", len(active_members))
-
-    # Community criteria
-    eligible_members = active_members[active_members['community_id'] == COMMUNITY_ID]
-
-    return eligible_members
-
-
-def print_table_info(db):
-    # all_tables = pd.read_sql_query("show tables", db).squeeze().values
-    # print(all_tables)
-
-    # tables = ['filtered_coupons', 'filtered_issues', 'filtered_offers']
-
-    tables = ['member', 'member_category', 'member_family_member', 'filtered_offers', 'category']
-    for table_name in tables:
-
-        print("\n\nTABLE", table_name)
-        query = "SELECT * FROM %s"%table_name
-        df = pd.read_sql_query(query, db)
-
-        for col in df.columns:
-            unique_values = pd.unique(df[col].values)
-            if len(unique_values) <= 10:
-                print("\t", col, type(unique_values[0]), len(unique_values), unique_values, unique_values[0])
-            else:
-                print("\t", col, type(unique_values[0]), len(unique_values), unique_values[0])
-
-    # query = "select * from category"
-    # category_summary = pd.read_sql_query(query, db)
-    # print(category_summary[['id','title','enabled_at']])
-    # print(len(category_summary))
-
-
 if __name__ == '__main__':
     main()
