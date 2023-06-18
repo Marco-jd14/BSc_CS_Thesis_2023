@@ -8,7 +8,6 @@ Created on Thu May 18 18:19:02 2023
 
 import sys
 import copy
-import enum
 import numpy as np
 import pandas as pd
 import datetime as dt
@@ -106,7 +105,7 @@ def datetime_range(start_date, end_date, delta):
 
 ################# GET ALL ELIGIBLE MEMBERS FUNCTION ########################################
 
-def get_all_eligible_members(batch_to_send, members, supporting_info, historical_context):
+def get_all_eligible_members(batch_to_send, members, supporting_info, historical_context, sim_start_time):
     # Batch column definitions
     from coupon_stream_simulator import TIMESTAMP_COLUMN, OFFER_ID_COLUMN
 
@@ -123,16 +122,16 @@ def get_all_eligible_members(batch_to_send, members, supporting_info, historical
     for offer_id, nr_coupons_to_send in offer_ids_to_send.items():
         offer = offers.loc[offer_id, :].squeeze()
 
-        TrackTime("get all eligible members static")
+        TrackTime("Get all eligible members static")
         eligible_members = get_eligible_members_static(        members, offer, all_partners, all_member_categories, tracktime=False)
 
-        TrackTime("get all eligible members time")
+        TrackTime("Get all eligible members time")
         eligible_members = get_eligible_members_time_dependent(eligible_members, offer, all_partners, all_children, batch_sent_at, tracktime=False)
 
-        TrackTime("get all eligible members history")
-        eligible_members = get_eligible_members_history(       eligible_members, offer_id, nr_coupons_to_send, historical_context, batch_sent_at)
+        TrackTime("Get all eligible members history")
+        eligible_members = get_eligible_members_history(       eligible_members, offer_id, nr_coupons_to_send, historical_context, batch_sent_at, sim_start_time)
 
-        TrackTime("Process eligible members")
+        TrackTime("Get all eligible members")
         # if len(eligible_members) == 0:
         #     print("\nCoupons from offer_id %d have 0 eligible members"%offer_id)
         offer_id_to_eligible_members[offer_id] = eligible_members['id'].values
@@ -142,67 +141,56 @@ def get_all_eligible_members(batch_to_send, members, supporting_info, historical
 
 ################# GET ALL ELIGIBLE MEMBERS BASED ON HISTORICALLY RECEIVED COUPONS ########################################
 
-def get_eligible_members_history(members, offer_id, nr_coupons_to_send, historical_context, batch_sent_at):
+def get_eligible_members_history(members, offer_id, nr_coupons_to_send, historical_context, batch_sent_at, sim_start_time, tracktime=False):
+    from coupon_stream_simulator import UTILITY_TYPE, Util_Type
     # Historical context column definitions
-    from coupon_stream_simulator import ACCEPTED_LAST_COUPON_AT, LET_LAST_COUPON_EXPIRE_AT, SET_OF_RECEIVED_OFFER_IDS
+    from coupon_stream_simulator import OFFER_CONTEXT, MEMBER_CONTEXT, ACCEPTED_LAST_COUPON_AT, LET_LAST_COUPON_EXPIRE_AT
+
+    batch_sent_at_day_nr = (batch_sent_at - sim_start_time).total_seconds() / 60 / 60 / 24
 
     def let_coupon_expire_last_month(member_id):
-        let_last_coupon_expire_at = historical_context[member_id][LET_LAST_COUPON_EXPIRE_AT]
-        if let_last_coupon_expire_at is None:
-            return False
-        return batch_sent_at <= let_last_coupon_expire_at + dt.timedelta(days=30)
-        # return (batch_sent_at - let_last_coupon_expire_at).days <= 30
-        # return batch_sent_at - let_last_coupon_expire_at <= dt.timedelta(days=30)
+        return batch_sent_at_day_nr - historical_context[MEMBER_CONTEXT][member_id][LET_LAST_COUPON_EXPIRE_AT] < 30
 
-    # def accepted_coupon_last_month(member_id):
-    #     accepted_last_coupon_at = historical_context[member_id][ACCEPTED_LAST_COUPON_AT]
-    #     if accepted_last_coupon_at is None:
-    #         return False
-    #     return batch_sent_at <= accepted_last_coupon_at + dt.timedelta(days=30)
-        # return (batch_sent_at - accepted_last_coupon_at).days <= 30
-        # return batch_sent_at - accepted_last_coupon_at <= dt.timedelta(days=30)
+    def accepted_coupon_last_month(member_id):
+        return batch_sent_at_day_nr - historical_context[MEMBER_CONTEXT][member_id][ACCEPTED_LAST_COUPON_AT] < 30
 
     def has_outstanding_coupon(member_id):
-        accepted_last_coupon_at = historical_context[member_id][ACCEPTED_LAST_COUPON_AT]
-        let_last_coupon_expire_at = historical_context[member_id][LET_LAST_COUPON_EXPIRE_AT]
-        dates = []
-        if accepted_last_coupon_at is not None:
-            dates.append(accepted_last_coupon_at)
-        if let_last_coupon_expire_at is not None:
-            dates.append(let_last_coupon_expire_at)
-        if len(dates) == 0:
-            return False
-        last_date = max(dates)
+        accepted_last_coupon_at = historical_context[MEMBER_CONTEXT][member_id][ACCEPTED_LAST_COUPON_AT]
+        let_last_coupon_expire_at = historical_context[MEMBER_CONTEXT][member_id][LET_LAST_COUPON_EXPIRE_AT]
         # If last_accepted or last_let_expire is in the future, the member is yet to respond to the outstanding coupon with that response
-        return batch_sent_at < last_date
+        return batch_sent_at_day_nr < accepted_last_coupon_at or batch_sent_at_day_nr < let_last_coupon_expire_at
 
-    TrackTime("already received offer")
-    members_who_already_received_this_offer = \
-        list(filter(lambda member_id: offer_id in historical_context[member_id][SET_OF_RECEIVED_OFFER_IDS], historical_context.keys()))
-    members = members[~members['id'].isin(members_who_already_received_this_offer)]
+    members_who_already_received_this_offer = set(historical_context[OFFER_CONTEXT][offer_id])
 
-    TrackTime("recently let coupon expire")
-    members_who_let_coupon_expire_in_last_month = \
-        list(filter(let_coupon_expire_last_month, historical_context.keys()))
+    if UTILITY_TYPE == Util_Type.full_historical:
+        if tracktime: TrackTime("Recently let coupon expire")
+        members_who_let_coupon_expire_in_last_month = \
+            set(filter(let_coupon_expire_last_month, members['id'].values))
+        members_to_filter = list(members_who_already_received_this_offer.union(members_who_let_coupon_expire_in_last_month))
+    else:
+        members_to_filter = list(members_who_already_received_this_offer)
 
-    members = members[~members['id'].isin(members_who_let_coupon_expire_in_last_month)]
+    if tracktime: TrackTime("Filter members")
+    members = members[~members['id'].isin(members_to_filter)]
 
     if len(members) <= nr_coupons_to_send:
         return members # No point in filtering as we already have fewer eligible members than coupons to send out
 
-    TrackTime("recently accepted coupon")
-    accept_dates = list(filter(lambda my_tuple: my_tuple[1] is not None, list(map(lambda member_id:(member_id, historical_context[member_id][ACCEPTED_LAST_COUPON_AT]) , historical_context.keys()))))
-    accept_dates = pd.DataFrame(accept_dates, columns=['member_id','accepted_last_coupon_at'])
-    accept_dates['recently_accepted'] = (batch_sent_at - accept_dates['accepted_last_coupon_at']) <= dt.timedelta(days=30)
-    members_who_accepted_coupon_in_last_month = accept_dates['member_id'][accept_dates['recently_accepted']].values
 
-    TrackTime("has outstanding coupon")
+    if tracktime: TrackTime("Has outstanding coupon")
     members_with_outstanding = \
-        list(filter(has_outstanding_coupon, historical_context.keys()))
+        set(filter(has_outstanding_coupon, members['id'].values))
 
-    TrackTime("check whether to filter")
-    potentially_ineligible_members = list(set(members_with_outstanding).union(set(members_who_accepted_coupon_in_last_month)))
-    filtered_members = members[~members['id'].isin(potentially_ineligible_members)]
+    if UTILITY_TYPE == Util_Type.full_historical:
+        if tracktime: TrackTime("Recently accepted coupon")
+        members_who_accepted_coupon_in_last_month = \
+            set(filter(accepted_coupon_last_month, members['id'].values))
+        members_to_filter = list(members_with_outstanding.union(members_who_accepted_coupon_in_last_month))
+    else:
+        members_to_filter = list(members_with_outstanding)
+
+    if tracktime: TrackTime("Filter members")
+    filtered_members = members[~members['id'].isin(members_to_filter)]
     if len(filtered_members) >= nr_coupons_to_send:
         # Only filter if the filtering does not lead to a shortage of eligible members
         return filtered_members

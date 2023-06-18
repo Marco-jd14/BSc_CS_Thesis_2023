@@ -8,6 +8,7 @@ Created on Wed May 24 20:46:00 2023
 import os
 import re
 import sys
+import enum
 import copy
 import json
 import numpy as np
@@ -31,6 +32,14 @@ run_folder = './timelines/run_%d/'
 allocator_algorithms = {'greedy': greedy,
                         'max_sum_utility': max_sum_utility}
 
+class Util_Type(enum.Enum):
+    full_historical     = 0
+    partial_historical  = 1
+    time_discounted     = 2
+
+UTILITY_TYPE = Util_Type.full_historical
+
+
 def main():
     conn = connect_db.establish_host_connection()
     db   = connect_db.establish_database_connection(conn)
@@ -43,7 +52,7 @@ def main():
 
     BATCH_SIZES = [1]
     ALLOCATOR_ALGORITHMS = ['greedy']
-    NR_SIMULATIONS = 100
+    NR_SIMULATIONS = 1
 
     for batch_size, alloc_alg in zip(BATCH_SIZES, ALLOCATOR_ALGORITHMS):
     # for batch_size, alloc_alg in zip([1, 5, 50], ['greedy','greedy','greedy']):
@@ -134,7 +143,7 @@ def convert_events_pkl_to_excel(run_nr, sim_nr):
 # Batch column definitions
 TIMESTAMP_COLUMN, COUPON_ID_COLUMN, ISSUE_ID_COLUMN, OFFER_ID_COLUMN = 0, 1, 3, 4
 # Historical context column definitions
-ACCEPTED_LAST_COUPON_AT, LET_LAST_COUPON_EXPIRE_AT, SET_OF_RECEIVED_OFFER_IDS = 0, 1, 2
+OFFER_CONTEXT, MEMBER_CONTEXT, ACCEPTED_LAST_COUPON_AT, LET_LAST_COUPON_EXPIRE_AT = 0, 1, 0, 1
 
 
 # def allocate_resources(resources_stream, resources_properties, agents, utility_values, utility_indices):
@@ -159,7 +168,10 @@ def simulate_coupon_allocations(batch_size, get_allocation, utility_values, util
     prev_batch_unsent_coupons = []
 
     # Initialize historical context and the 3 values based on member-id (key)
-    historical_context = {member_id: [None, None, set()] for member_id in members['id'].values}
+    offers = supporting_info[0]
+    offers_context = {offer_id: set() for offer_id in offers['id'].values}
+    member_context = {member_id: [-np.inf, -np.inf] for member_id in members['id'].values}
+    historical_context = (offers_context, member_context)
 
     # Loop over all issues to release
     batch_counter = 0
@@ -167,6 +179,9 @@ def simulate_coupon_allocations(batch_size, get_allocation, utility_values, util
         TrackTime("Releasing new issue")
         if issue_counter%20 == 0:
             print("\rissue nr %d (%.1f%%)     batch nr %d"%(issue_counter,100*issue_counter/len(issues), batch_counter), end='')
+
+        if issue_counter == 0:
+            sim_start_time = issue['sent_at']
 
         # Release the new issue
         max_coupon_ids, coupon_lists = release_new_issue(issue, max_existing_coupon_id, max_existing_coupon_follow_id)
@@ -188,7 +203,7 @@ def simulate_coupon_allocations(batch_size, get_allocation, utility_values, util
             # Generate events for the next batch
             result = send_out_new_batch(get_allocation, issues, members, utility_values, utility_indices, supporting_info, distribution_info,
                                         historical_context, events_list, unsorted_queue_of_coupons, batch_size, batch_counter,
-                                        prev_batch_unsent_coupons, max_existing_coupon_id, verbose)
+                                        prev_batch_unsent_coupons, max_existing_coupon_id, sim_start_time, verbose)
 
             # Unpack the return values
             unsorted_queue_of_coupons, events_list, historical_context, \
@@ -199,7 +214,7 @@ def simulate_coupon_allocations(batch_size, get_allocation, utility_values, util
     if len(unsorted_queue_of_coupons) > 0:
         result = send_out_new_batch(get_allocation, issues, members, utility_values, utility_indices, supporting_info, distribution_info,
                                     historical_context, events_list, unsorted_queue_of_coupons, len(unsorted_queue_of_coupons), batch_counter+1,
-                                    prev_batch_unsent_coupons, max_existing_coupon_id, verbose)
+                                    prev_batch_unsent_coupons, max_existing_coupon_id, sim_start_time, verbose)
         # Unpack the return values
         _, events_list, _, _, _ = result
 
@@ -212,10 +227,9 @@ def simulate_coupon_allocations(batch_size, get_allocation, utility_values, util
     return events_df
 
 
-
 def send_out_new_batch(get_allocation, issues, members, utility_values, utility_indices, supporting_info, distribution_info,
                        historical_context, events_list, unsorted_queue_of_coupons, batch_size, batch_ID,
-                       prev_batch_unsent_coupons, max_existing_coupon_id, verbose):
+                       prev_batch_unsent_coupons, max_existing_coupon_id, sim_start_time, verbose):
     if verbose: print("\nBatch", batch_ID)
     TrackTime("Sending out batch")
 
@@ -256,7 +270,7 @@ def send_out_new_batch(get_allocation, issues, members, utility_values, utility_
 
     # Prepare the matrix of utilities for the allocation-algorithm(s)
     batch_utility, batch_indices = filter_relevant_utilities(batch_to_send, members, utility_values, utility_indices, 
-                                                             supporting_info, historical_context)
+                                                             supporting_info, historical_context, sim_start_time)
     coupon_index_to_id, member_index_to_id = batch_indices
 
     # Zero eligible members
@@ -329,16 +343,23 @@ def send_out_new_batch(get_allocation, issues, members, utility_values, utility_
     assert len(sent_coupons) == len(accepted_coupons) + len(not_accepted_coupons), "%d != %d (%d + %d)"%(len(sent_coupons), len(accepted_coupons) + len(not_accepted_coupons), len(accepted_coupons), len(not_accepted_coupons))
     assert len(not_accepted_coupons) == len(came_available_coupons) + len(expired_coupons), "%d != %d (%d + %d)"%(len(not_accepted_coupons), len(came_available_coupons) + len(expired_coupons), len(came_available_coupons), len(expired_coupons))
 
-    # Update historical context
+    TrackTime("Update historical context")
+    # Update historical offer context
+    for sent_coupon in sent_coupons:
+        member_id = sent_coupon[-2]
+        offer_id = sent_coupon[1+OFFER_ID_COLUMN]
+        historical_context[OFFER_CONTEXT][offer_id].add(member_id)
+    # Update historical member context: last_accepted_at
     for accepted_coupon in accepted_coupons:
         member_id = accepted_coupon[-2]
-        historical_context[member_id][ACCEPTED_LAST_COUPON_AT]  = accepted_coupon[1+TIMESTAMP_COLUMN]
-        historical_context[member_id][SET_OF_RECEIVED_OFFER_IDS].add(accepted_coupon[1+OFFER_ID_COLUMN])
+        accepted_at_day_nr = (accepted_coupon[1+TIMESTAMP_COLUMN] - sim_start_time).total_seconds() / 60 / 60 / 24
+        historical_context[MEMBER_CONTEXT][member_id][ACCEPTED_LAST_COUPON_AT] = accepted_at_day_nr
+    # Update historical member context: last_let_expire_at
     for not_accepted_coupon in not_accepted_coupons:
         if not_accepted_coupon[0] == Event.member_let_expire:
             member_id = not_accepted_coupon[-2]
-            historical_context[member_id][LET_LAST_COUPON_EXPIRE_AT]  = not_accepted_coupon[1+TIMESTAMP_COLUMN]
-            historical_context[member_id][SET_OF_RECEIVED_OFFER_IDS].add(not_accepted_coupon[1+OFFER_ID_COLUMN])
+            let_expire_at_day_nr = (not_accepted_coupon[1+TIMESTAMP_COLUMN] - sim_start_time).total_seconds() / 60 / 60 / 24
+            historical_context[MEMBER_CONTEXT][member_id][LET_LAST_COUPON_EXPIRE_AT] = let_expire_at_day_nr
 
     if len(unsent_coupons) == len(batch_to_send):
         print("\nDid not allocate any coupons from last batch")
@@ -504,7 +525,8 @@ def check_expiry_unsent_coupons(batch_sent_at, issues, prev_batch_unsent_coupons
 
 ############# PREPARATORY METHOD BEFORE CALLING AN ALLOCATOR_ALGORITHM #########################################
 
-def filter_relevant_utilities(batch_to_send, members, utility_values, utility_indices, supporting_info, historical_context):
+def filter_relevant_utilities(batch_to_send, members, utility_values, utility_indices, supporting_info,
+                              historical_context, sim_start_time):
     TrackTime("Filtering relevant utilies")
     member_id_to_index, offer_id_to_index = utility_indices
 
@@ -516,7 +538,8 @@ def filter_relevant_utilities(batch_to_send, members, utility_values, utility_in
 
     TrackTime("Get all eligible members")
     # Determine for every offer, the set of eligible members
-    offer_id_to_eligible_members = get_all_eligible_members(batch_to_send, members, supporting_info, historical_context)
+    offer_id_to_eligible_members = get_all_eligible_members(batch_to_send, members, supporting_info,
+                                                            historical_context, sim_start_time)
 
     TrackTime("Filtering relevant utilies")
     # Make one big set of eligible members
@@ -679,7 +702,7 @@ def prepare_simulation_data(db):
     filtered_issues['id_index'] = filtered_issues['id']
     filtered_issues = filtered_issues.set_index('id_index')
 
-    # Force pd.Timestamp to be datetime.datetime objects
+    # Force pd.Timestamp to be datetime.datetime objects (datetime is faster in non-vectorized instances, like this simulation)
     datetimes = filtered_issues['sent_at'].dt.to_pydatetime()
     filtered_issues['sent_at'] = pd.Series(datetimes, index=filtered_issues.index, dtype=object)
 
