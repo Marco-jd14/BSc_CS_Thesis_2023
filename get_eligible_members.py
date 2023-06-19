@@ -113,6 +113,8 @@ def get_all_eligible_members(batch_to_send, members, supporting_info, historical
     offers, all_member_categories, all_children, all_partners = supporting_info
 
     # Phone nr and email criteria already in effect
+    # members = members[~members['email'].isna()]
+    # members = members[~members['mobile'].isna()]
     # member must be active to be eligible
     members = members[members['active'] == 1]
 
