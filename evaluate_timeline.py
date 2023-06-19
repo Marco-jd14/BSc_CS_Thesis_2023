@@ -14,7 +14,6 @@ import numpy as np
 import pandas as pd
 import datetime as dt
 from pprint import pprint
-from collections import Counter
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 from dateutil.relativedelta import relativedelta
@@ -32,13 +31,13 @@ global_folder = './timelines/'
 run_folder = './timelines/run_%d/'
 
 SHOW_BASELINE = True
-RECOMPUTE = False
+RECOMPUTE = True
 
 def main():
 
     # baseline = pd.read_csv('./timelines/baseline_events.csv')
     # baseline.to_pickle('./timelines/baseline_events.pkl')
-    run_nrs_to_read = [4,7]
+    run_nrs_to_read = [45]
 
     TrackTime("Connect to db")
     conn = connect_db.establish_host_connection()
@@ -50,16 +49,16 @@ def main():
     filtered_issues, members = result
     print("")
 
-    # Read utility
-    utility_df = pd.read_pickle(global_folder + "utility_df.pkl")
-
 
     # Read simulated events and info
     TrackTime("Get all run data")
-    all_run_data, all_run_info = {}, {}
+    all_run_data, all_run_info, all_run_nr_info = {}, {}, {}
     for run_nr in run_nrs_to_read:
         if RECOMPUTE or not os.path.exists(run_folder%run_nr + '%d_run_data.pkl'%run_nr):
+
+            utility_df = pd.read_pickle(run_folder%run_nr + "%d_utility_df.pkl"%run_nr)
             run_name, run_data = extract_relevant_info(run_nr, utility_df, members['id'], filtered_issues)
+
             with open(run_folder%run_nr + '%d_run_name.pkl'%run_nr, 'wb') as fp:
                 pickle.dump(run_name, fp)
             with open(run_folder%run_nr + '%d_run_data.pkl'%run_nr, 'wb') as fp:
@@ -71,12 +70,32 @@ def main():
             with open(run_folder%run_nr + '%d_run_data.pkl'%run_nr, 'rb') as fp:
                 run_data = pickle.load(fp)
 
+
         f = open(run_folder%run_nr + "%d_info.json"%run_nr)
         run_info = json.load(f)
         f.close()
 
+        # # Redefine run-name
+        # run_name = run_info['allocator_algorithm'] + "_" + str(run_info['batch_size'])
+        # run_name += '_' + "".join(list(map(lambda word: word.upper()[0], run_info['utility_type'].split('_'))))
+        # if 'version_tag' in run_info.keys() and run_info['version_tag'].strip() != "":
+        #     run_name += "_" + run_info['version_tag']
+        # with open(run_folder%run_nr + '%d_run_name.pkl'%run_nr, 'wb') as fp:
+        #     pickle.dump(run_name, fp)
+
         all_run_data[run_name] = run_data
         all_run_info[run_name] = run_info
+        all_run_nr_info[run_nr] = run_info
+
+    # f = open(global_folder + 'run_info_overview.json')
+    # prev_all_run_nr_info = json.load(f)
+    # f.close()
+    # prev_all_run_nr_info.update(all_run_nr_info)
+    # with open(global_folder + 'run_info_overview.json', 'w') as fp:
+    #     json.dump(prev_all_run_nr_info, fp)
+
+    # Read utility
+    utility_df = pd.read_pickle(global_folder + "new_utility_df.pkl")
 
     # Read baseline events
     base_events = pd.read_pickle(global_folder + 'baseline_events.pkl')
@@ -89,10 +108,12 @@ def main():
     # Evaluate and plot
     TrackTime("Evaluate")
     evaluate_timelines(all_run_data, base_data, utility_df, members, filtered_issues['id'])
-    TrackTime("Plots")
+    TrackTime("Member plots")
     plot_member_stats(all_run_data, base_data)
+    TrackTime("Monthly plots")
     plot_monthly_stats(all_run_data, base_data)
-    plot_batch_stats(all_run_data, base_data, all_run_info)
+    # TrackTime("Batch plots")
+    # plot_batch_stats(all_run_data, base_data, all_run_info)
 
     db.close()
     TrackReport()
@@ -105,14 +126,14 @@ def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
 
     TrackTime("Read info")
     f = open(run_folder%run_nr + "%d_info.json"%run_nr)
-    info = json.load(f)
+    run_info = json.load(f)
     f.close()
 
     member_stats_all_sims = None
     monthly_stats_all_sims = None
     batch_stats_all_sims = None
     for sim_nr in timeline_nrs:
-        print("\rSimulation %d"%sim_nr, end='\t\t')
+        print("\rReading data from run %d, simulation %d"%(run_nr, sim_nr), end='\t\t')
         TrackTime("Read pickle")
         sim_events = pd.read_pickle(run_folder%run_nr + "%d.%d_events_df.pkl"%(run_nr, sim_nr))
         sim_events['event'] = sim_events['event'].apply(lambda event: Event[str(event)[len("Event."):]])
@@ -122,7 +143,7 @@ def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
         perform_timeline_sense_check(sim_events, filtered_issues)
 
         TrackTime("Extract timeline info")
-        sim_info = extract_timeline_info(sim_events, utility_df, member_ids, info['batch_size'])
+        sim_info = extract_timeline_info(sim_events, utility_df, member_ids, run_info['batch_size'])
         member_stats, monthly_stats, batch_stats = sim_info
 
         TrackTime("Combine monthly info")
@@ -165,7 +186,10 @@ def extract_relevant_info(run_nr, utility_df, member_ids, filtered_issues):
 
     member_stats_all_sims = member_stats_all_sims.sort_index(axis=1)
 
-    run_name = info['allocator_algorithm'] + "_" + str(info['batch_size'])
+    run_name = run_info['allocator_algorithm'] + "_" + str(run_info['batch_size'])
+    run_name += '_' + "".join(list(map(lambda word: word.upper()[0], run_info['utility_type'].split('_'))))
+    if 'version_tag' in run_info.keys() and run_info['version_tag'].strip() != "":
+        run_name += "_" + run_info['version_tag']
     return run_name, (member_stats_all_sims, monthly_stats_all_sims, batch_stats_all_sims)
 
 
@@ -319,7 +343,6 @@ def plot_batch_stats(all_run_data, base_data, all_run_info):
 
 
         batch_stats_all_sims['duration_category'] = batch_stats_all_sims['duration_since_prev_batch'].apply(get_duration_category)
-        TrackTime("Overig")
         # duration_mins = batch_stats_all_sims['duration_since_prev_batch'].astype('timedelta64[s]') / 60
         categories = list(map(lambda cat: cat[1], duration_categories))
         cat_counts = batch_stats_all_sims['duration_category'][batch_stats_all_sims['duration_category'].isin(categories)].value_counts()
@@ -401,12 +424,12 @@ def plot_member_stats(all_run_data, base_data):
             plt.plot(equality, 'k--', alpha=0.5, label='equality')
 
             baseline = base_member_stats['total_utility'].values
-            plt.plot(np.cumsum(np.sort(baseline)/np.sum(baseline)), label='baseline', color=base_col)
+            plt.plot(np.cumsum(np.sort(baseline)/np.sum(baseline)), label='baseline', color=base_col, linewidth=1)
 
         sorted_utils = np.sort(member_stats_all_sims['total_utility'].values, axis=0)
         avg_utils = np.average(sorted_utils, axis=1)
 
-        plt.plot(np.cumsum(np.sort(avg_utils)/np.sum(avg_utils)), label=run_name, color=colors[i])
+        plt.plot(np.cumsum(np.sort(avg_utils)/np.sum(avg_utils)), label=run_name, color=colors[i], linewidth=1)
 
 
         ####### Sorted Utilities Plot #############################
@@ -489,24 +512,32 @@ def plot_member_stats(all_run_data, base_data):
         columns_to_plot = ['total_utility', 'nr_accepted', 'nr_sent']#'nr_declined', 'nr_let_expire']
         fig_names.extend(list(map(lambda s: '%s_histogram'%s, columns_to_plot)))
         only_nonzeros = [True, False, False]# False, False]
-        
+        cut_off_value = 50
+        bins = cut_off_value + 1
+
         for col, only_nonzero in zip(columns_to_plot, only_nonzeros):
             plt.figure('%s_histogram'%col)
             if i == 0 and SHOW_BASELINE:
                 values = base_member_stats[col].values
                 to_plot = values[values>0] if only_nonzero else values
                 to_plot = np.array([to_plot]*nr_simulations).reshape(-1)
-                plt.hist(to_plot, bins=30, alpha=0.3, color=base_col, label='baseline', density=False)
+                to_plot[to_plot > cut_off_value] = cut_off_value
+                plt.hist(to_plot, bins=bins, alpha=0.3, color=base_col, label='baseline', density=False)
 
             flat_values = member_stats_all_sims[col].values.reshape(-1)
             to_plot = flat_values[flat_values>0] if only_nonzero else flat_values
-            plt.hist(to_plot, bins=30, alpha=0.5, range=None, color=colors[i], label=run_name, density=False)
+            to_plot[to_plot > cut_off_value] = cut_off_value
+            plt.hist(to_plot, bins=bins, alpha=0.5, range=None, color=colors[i], label=run_name, density=False)
 
             if i == len(all_run_data)-1:
                 def scale_ints(x, *args):
                     return "%d"%(int(float(x)/nr_simulations))
                 ax = plt.gca()
                 ax.yaxis.set_major_formatter(mtick.FuncFormatter(scale_ints))
+
+                def update_int_ticks(x, *args):
+                    return "%d+"%x if x == cut_off_value else int(x)
+                ax.xaxis.set_major_formatter(mtick.FuncFormatter(update_int_ticks))
 
 
     # Set the title and legend
@@ -516,6 +547,8 @@ def plot_member_stats(all_run_data, base_data):
         plt.legend()
         # plt.save()
         # plt.show()
+
+
 
 
 
@@ -572,7 +605,7 @@ def calc_utility(utility_df, member_id, accepted_offers):
 
 
 def perform_timeline_sense_check(events_df, issues):
-    print("")
+    # print("")
     relevant_issue_columns_check   = ['id', 'offer_id', 'sent_at', 'amount', 'expires_at']
     relevant_issue_columns_compare = ['id', 'total_issued', 'nr_accepted', 'nr_expired', 'nr_not_sent_on']
     issues = issues[relevant_issue_columns_check + relevant_issue_columns_compare[1:]]
