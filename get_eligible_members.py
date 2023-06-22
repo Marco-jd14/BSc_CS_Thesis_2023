@@ -105,7 +105,7 @@ def datetime_range(start_date, end_date, delta):
 
 ################# GET ALL ELIGIBLE MEMBERS FUNCTION ########################################
 
-def get_all_eligible_members(batch_to_send, members, supporting_info, historical_context, sim_start_time):
+def get_all_eligible_members(batch_to_send, members, supporting_info, historical_context, util_type, sim_start_time):
     # Batch column definitions
     from coupon_stream_simulator import TIMESTAMP_COLUMN, OFFER_ID_COLUMN
 
@@ -131,7 +131,7 @@ def get_all_eligible_members(batch_to_send, members, supporting_info, historical
         eligible_members = get_eligible_members_time_dependent(eligible_members, offer, all_partners, all_children, batch_sent_at, tracktime=False)
 
         TrackTime("Get all eligible members history")
-        eligible_members = get_eligible_members_history(       eligible_members, offer_id, nr_coupons_to_send, historical_context, batch_sent_at, sim_start_time)
+        eligible_members = get_eligible_members_history(       eligible_members, offer_id, nr_coupons_to_send, historical_context, util_type, batch_sent_at, sim_start_time)
 
         TrackTime("Get all eligible members")
         # if len(eligible_members) == 0:
@@ -143,8 +143,8 @@ def get_all_eligible_members(batch_to_send, members, supporting_info, historical
 
 ################# GET ALL ELIGIBLE MEMBERS BASED ON HISTORICALLY RECEIVED COUPONS ########################################
 
-def get_eligible_members_history(members, offer_id, nr_coupons_to_send, historical_context, batch_sent_at, sim_start_time, tracktime=False):
-    from coupon_stream_simulator import UTILITY_TYPE, Util_Type
+def get_eligible_members_history(members, offer_id, nr_coupons_to_send, historical_context, util_type, batch_sent_at, sim_start_time, tracktime=False):
+    from coupon_stream_simulator import Util_Type
     # Historical context column definitions
     from coupon_stream_simulator import OFFER_CONTEXT, MEMBER_CONTEXT, ACCEPTED_LAST_COUPON_AT, LET_LAST_COUPON_EXPIRE_AT
 
@@ -164,7 +164,7 @@ def get_eligible_members_history(members, offer_id, nr_coupons_to_send, historic
 
     members_who_already_received_this_offer = set(historical_context[OFFER_CONTEXT][offer_id])
 
-    if UTILITY_TYPE == Util_Type.full_historical:
+    if util_type == Util_Type.full_historical:
         if tracktime: TrackTime("Recently let coupon expire")
         members_who_let_coupon_expire_in_last_month = \
             set(filter(let_coupon_expire_last_month, members['id'].values))
@@ -183,7 +183,7 @@ def get_eligible_members_history(members, offer_id, nr_coupons_to_send, historic
     members_with_outstanding = \
         set(filter(has_outstanding_coupon, members['id'].values))
 
-    if UTILITY_TYPE == Util_Type.full_historical:
+    if util_type == Util_Type.full_historical:
         if tracktime: TrackTime("Recently accepted coupon")
         members_who_accepted_coupon_in_last_month = \
             set(filter(accepted_coupon_last_month, members['id'].values))

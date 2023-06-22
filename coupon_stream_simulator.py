@@ -29,6 +29,8 @@ np.random.seed(0)
 
 global_folder = './timelines/'
 run_folder = './timelines/run_%d/'
+
+
 allocator_algorithms = {'greedy':           greedy,
                         'max_sum_utility':  max_sum_utility,
                         'maximin_utility':  maximin_utility,
@@ -39,50 +41,55 @@ class Util_Type(enum.Enum):
     partial_historical  = 1
     time_discounted     = 2
 
-UTILITY_TYPE = Util_Type.time_discounted
-
 
 def main():
     conn = connect_db.establish_host_connection()
     db   = connect_db.establish_database_connection(conn)
     print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
 
-    # convert_events_pkl_to_excel(21,0)
+    # convert_events_pkl_to_excel(57,0)
     # sys.exit()
 
     util_prep, data_prep = prepare_simulation_data(db)
 
-    BATCH_SIZES = [50]
-    ALLOCATOR_ALGORITHMS = ['greedy']
     NR_SIMULATIONS = 100
+    ALLOCATOR_ALGORITHMS = ['greedy']
+    BATCH_SIZES = [1,50,200]
+    UTILITY_TYPES = [Util_Type.time_discounted, Util_Type.full_historical, Util_Type.partial_historical]
 
-    for batch_size, alloc_alg in zip(BATCH_SIZES, ALLOCATOR_ALGORITHMS):
-        # try:
-            run_experiment(data_prep, util_prep, batch_size, alloc_alg, NR_SIMULATIONS)
-        # except:
-        #     TrackReport()
+    # for batch_size, alloc_alg, util_type in zip(BATCH_SIZES, ALLOCATOR_ALGORITHMS, UTILITY_TYPES):
+    for alloc_alg in ALLOCATOR_ALGORITHMS:
+        for batch_size in BATCH_SIZES:
+            for util_type in UTILITY_TYPES:
+                # try:
+                    run_experiment(data_prep, util_prep, batch_size, alloc_alg, util_type, NR_SIMULATIONS)
+                # except:
+                #     TrackReport()
 
 
-def run_experiment(data_prep, util_prep, BATCH_SIZE, ALLOCATOR_ALGORITHM, NR_SIMULATIONS):
+def run_experiment(data_prep, util_prep, batch_size, alloc_alg_name, util_type, NR_SIMULATIONS):
     run_folders = list(filter(lambda name: os.path.isdir(global_folder + name), os.listdir(global_folder)))
-    run_nr = max(list(map(lambda folder_name: int(folder_name.split("_")[-1]), run_folders))) + 1 if len(run_folders) > 0 else 1
+    def extract_run_nr(folder_name):
+        try:    return int(folder_name.split("_")[-1])
+        except: return 0
+    run_nr = max(list(map(extract_run_nr, run_folders))) + 1 if len(run_folders) > 0 else 1
 
-    run_info = {'batch_size': BATCH_SIZE,
-                'allocator_algorithm': ALLOCATOR_ALGORITHM,
-                'utility_type': str(UTILITY_TYPE).replace('Util_Type.',''),
-                'version_info': 'new updated utility_df',
-                'version_tag': 'utility_df',
+    run_info = {'batch_size':           batch_size,
+                'allocator_algorithm':  alloc_alg_name,
+                'utility_type':         str(util_type).replace('Util_Type.',''),
+                'version_info':         '',
+                'version_tag':          '',
                 }
     export_run_info(*util_prep, run_info, run_nr)
 
 
     start_time = dt.datetime.now().replace(microsecond=0)
     for sim_nr in range(NR_SIMULATIONS):
-        print("\nStarting simulation %d at %s (%s later)"%(sim_nr, dt.datetime.now().replace(microsecond=0), str(dt.datetime.now() - start_time).split('.')[0] ))
+        print("\nStarting simulation %d (run %d) at %s (%s later)"%(sim_nr, run_nr, dt.datetime.now().replace(microsecond=0), str(dt.datetime.now() - start_time).split('.')[0] ))
         start_time = dt.datetime.now().replace(microsecond=0)
 
         TrackTime("Other")
-        events_df = simulate_coupon_allocations(BATCH_SIZE, allocator_algorithms[ALLOCATOR_ALGORITHM], *util_prep, *data_prep)
+        events_df = simulate_coupon_allocations(batch_size, allocator_algorithms[alloc_alg_name], util_type, *util_prep, *data_prep)
         TrackTime("Export")
         export_timeline(events_df, sim_nr, run_nr)
 
@@ -106,7 +113,7 @@ def export_timeline(events_df, sim_nr, run_nr):
     events_df.to_pickle(folder + '%d.%d_events_df.pkl'%(run_nr, sim_nr))
 
     if False:
-        convert_events_pkl_to_excel(sim_nr, run_nr)
+        convert_events_pkl_to_excel(run_nr, sim_nr)
 
 
 def export_run_info(utility_values, utility_indices, run_info, run_nr):
@@ -153,7 +160,7 @@ TIME_DISCOUNT_RATIO = 0.1 ** (1/30)  # After 30 days, 10% of utility remains
 
 
 # def allocate_resources(resources_stream, resources_properties, agents, utility_values, utility_indices):
-def simulate_coupon_allocations(batch_size, get_allocation, utility_values, utility_indices, issues, members,
+def simulate_coupon_allocations(batch_size, get_allocation, util_type, utility_values, utility_indices, issues, members,
                                 supporting_info, distribution_info, verbose=False):
     # members = agents
     # offers = unique resources
@@ -167,7 +174,7 @@ def simulate_coupon_allocations(batch_size, get_allocation, utility_values, util
 
     # The list / df of events which will be exported in the end
     events_list = []
-    events_df = pd.DataFrame(columns=['event','at','coupon_id','coupon_follow_id','issue_id','offer_id','member_id','batch_id'])
+    events_df = pd.DataFrame(columns=['event','at','coupon_id','coupon_follow_id','issue_id','offer_id','member_id','batch_id','expiry_type'])
 
     # Initialize queue and define the columns of an element in the queue
     unsorted_queue_of_coupons = []
@@ -210,7 +217,7 @@ def simulate_coupon_allocations(batch_size, get_allocation, utility_values, util
 
             # Generate events for the next batch
             result = send_out_new_batch(get_allocation, issues, members, utility_values, utility_indices, supporting_info, distribution_info,
-                                        historical_context, events_list, unsorted_queue_of_coupons, batch_size, batch_counter,
+                                        historical_context, util_type, events_list, unsorted_queue_of_coupons, batch_size, batch_counter,
                                         prev_batch_unsent_coupons, prev_batch_time, max_existing_coupon_id, sim_start_time, verbose)
 
             # Unpack the return values
@@ -221,7 +228,7 @@ def simulate_coupon_allocations(batch_size, get_allocation, utility_values, util
     # Send out last batch
     if len(unsorted_queue_of_coupons) > 0:
         result = send_out_new_batch(get_allocation, issues, members, utility_values, utility_indices, supporting_info, distribution_info,
-                                    historical_context, events_list, unsorted_queue_of_coupons, len(unsorted_queue_of_coupons), batch_counter+1,
+                                    historical_context, util_type, events_list, unsorted_queue_of_coupons, len(unsorted_queue_of_coupons), batch_counter+1,
                                     prev_batch_unsent_coupons, prev_batch_time, max_existing_coupon_id, sim_start_time, verbose)
         # Unpack the return values
         _, events_list, _, _, _, _ = result
@@ -236,7 +243,7 @@ def simulate_coupon_allocations(batch_size, get_allocation, utility_values, util
 
 
 def send_out_new_batch(get_allocation, issues, members, utility_values, utility_indices, supporting_info, distribution_info,
-                       historical_context, events_list, unsorted_queue_of_coupons, batch_size, batch_ID,
+                       historical_context, util_type, events_list, unsorted_queue_of_coupons, batch_size, batch_ID,
                        prev_batch_unsent_coupons, prev_batch_time, max_existing_coupon_id, sim_start_time, verbose):
     if verbose: print("\nBatch", batch_ID)
     TrackTime("Sending out batch")
@@ -283,7 +290,7 @@ def send_out_new_batch(get_allocation, issues, members, utility_values, utility_
 
     # Prepare the matrix of utilities for the allocation-algorithm(s)
     utility_to_allocate, actual_utility, batch_indices = filter_relevant_utilities(batch_to_send, members, utility_values, utility_indices, 
-                                                                                   supporting_info, historical_context, sim_start_time)
+                                                                                   supporting_info, historical_context, util_type, sim_start_time)
     coupon_index_to_id, member_index_to_id = batch_indices
 
     # Zero eligible members
@@ -553,13 +560,13 @@ def check_expiry_unsent_coupons(batch_sent_at, issues, prev_batch_unsent_coupons
             if abs(batch_sent_at - issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at']) < dt.timedelta(days=3):
                 unsent_coupons_to_retry.append(coupon)
             else:
-                event = [Event.coupon_expired, issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at'], np.nan] + list(coupon[2:]) + [np.nan, np.nan]
+                event = [Event.coupon_expired, issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at'], np.nan] + list(coupon[2:]) + [np.nan, np.nan, "while awaiting batch"]
                 unsent_coupons_now_expired.append(event)
         else:
             if batch_sent_at < issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at']:
                 unsent_coupons_to_retry.append(coupon)
             else:
-                event = [Event.coupon_expired, issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at'], np.nan] + list(coupon[2:]) + [np.nan, np.nan]
+                event = [Event.coupon_expired, issues.loc[coupon[ISSUE_ID_COLUMN],'expires_at'], np.nan] + list(coupon[2:]) + [np.nan, np.nan, "while awaiting batch"]
                 unsent_coupons_now_expired.append(event)
 
     return unsent_coupons_to_retry, unsent_coupons_now_expired
@@ -568,7 +575,7 @@ def check_expiry_unsent_coupons(batch_sent_at, issues, prev_batch_unsent_coupons
 ############# PREPARATORY METHOD BEFORE CALLING AN ALLOCATOR_ALGORITHM #########################################
 
 def filter_relevant_utilities(batch_to_send, members, utility_values, utility_indices, supporting_info,
-                              historical_context, sim_start_time):
+                              historical_context, util_type, sim_start_time):
 
     TrackTime("Filtering relevant utilies")
     member_id_to_index, offer_id_to_index = utility_indices
@@ -579,7 +586,7 @@ def filter_relevant_utilities(batch_to_send, members, utility_values, utility_in
     utility_to_allocate = utility_values[:, offer_indices_to_send]
     actual_utility = copy.copy(utility_to_allocate)
 
-    if UTILITY_TYPE == Util_Type.time_discounted:
+    if util_type == Util_Type.time_discounted:
         TrackTime("Adjusting utilities (time-discounted)")
         utility_to_allocate -= historical_context[DISCOUNTED_UTILITIES].reshape(-1,1)
         utility_to_allocate[utility_to_allocate<0] = 0
@@ -587,7 +594,7 @@ def filter_relevant_utilities(batch_to_send, members, utility_values, utility_in
     TrackTime("Get all eligible members")
     # Determine for every offer, the set of eligible members
     offer_id_to_eligible_members = get_all_eligible_members(batch_to_send, members, supporting_info,
-                                                            historical_context, sim_start_time)
+                                                            historical_context, util_type, sim_start_time)
 
     TrackTime("Filtering relevant utilies")
     # Make one big set of eligible members
@@ -850,27 +857,27 @@ def make_utility(member_ids, offer_ids, filtered_coupons):
     utility_matrix = P_accept_members.values.reshape(-1,1) @ P_accept_offers.values.reshape(1,-1)
     utility_df = pd.DataFrame(utility_matrix, columns=P_accept_offers.index, index=P_accept_members.index)
 
-    # To be able to make adjustments to utility based on whether the member has accepted or declined a specific offer
-    zero_matrix = pd.DataFrame(np.zeros(utility_df.values.shape, dtype=int), columns=utility_df.columns, index=utility_df.index)
+    # # To be able to make adjustments to utility based on whether the member has accepted or declined a specific offer
+    # zero_matrix = pd.DataFrame(np.zeros(utility_df.values.shape, dtype=int), columns=utility_df.columns, index=utility_df.index)
 
     accepted_coupons = filtered_coupons[filtered_coupons['member_response'] == Event.member_accepted]
-    offer_per_member = accepted_coupons[['member_id','offer_id','id']].pivot_table(index=['member_id'], columns='offer_id', aggfunc='count', fill_value=0)['id']#.reset_index()
-    offer_per_member = (zero_matrix + offer_per_member).fillna(0)
-    member_accepted_offer = offer_per_member>0
+    # offer_per_member = accepted_coupons[['member_id','offer_id','id']].pivot_table(index=['member_id'], columns='offer_id', aggfunc='count', fill_value=0)['id']#.reset_index()
+    # offer_per_member = (zero_matrix + offer_per_member).fillna(0)
+    # member_accepted_offer = offer_per_member>0
 
     declined_coupons = filtered_coupons[filtered_coupons['member_response'] == Event.member_declined]
-    offer_per_member = declined_coupons[['member_id','offer_id','id']].pivot_table(index=['member_id'], columns='offer_id', aggfunc='count', fill_value=0)['id']#.reset_index()
-    offer_per_member = (zero_matrix + offer_per_member).fillna(0)
-    member_declined_offer = offer_per_member>0
+    # offer_per_member = declined_coupons[['member_id','offer_id','id']].pivot_table(index=['member_id'], columns='offer_id', aggfunc='count', fill_value=0)['id']#.reset_index()
+    # offer_per_member = (zero_matrix + offer_per_member).fillna(0)
+    # member_declined_offer = offer_per_member>0
 
     let_expire_coupons = filtered_coupons[filtered_coupons['member_response'] == Event.member_let_expire]
     avg_P_accept = len(accepted_coupons) / (len(accepted_coupons) + len(declined_coupons) + len(let_expire_coupons))
 
-    # Make adjustments to utility based on whether the member has accepted or declined a specific offer
-    utility_df = utility_df + 0.1*member_accepted_offer
-    utility_df[utility_df>=1] -= 0.1
-    utility_df = utility_df - 0.1*member_declined_offer
-    utility_df[utility_df<=0] += 0.1
+    # # Make adjustments to utility based on whether the member has accepted or declined a specific offer
+    # utility_df = utility_df + 0.1*member_accepted_offer
+    # utility_df[utility_df>=1] -= 0.1
+    # utility_df = utility_df - 0.1*member_declined_offer
+    # utility_df[utility_df<=0] += 0.1
     assert np.all(utility_df.values < 1) and np.all(utility_df.values > 0)
 
     ratio = np.log(avg_P_accept) / np.log(np.average(utility_df.values))
