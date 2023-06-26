@@ -164,7 +164,7 @@ def get_eligible_members_history(members, offer_id, nr_coupons_to_send, historic
 
     members_who_already_received_this_offer = set(historical_context[OFFER_CONTEXT][offer_id])
 
-    if util_type == Util_Type.full_historical:
+    if util_type.value == Util_Type.full_historical.value:
         if tracktime: TrackTime("Recently let coupon expire")
         members_who_let_coupon_expire_in_last_month = \
             set(filter(let_coupon_expire_last_month, members['id'].values))
@@ -183,7 +183,7 @@ def get_eligible_members_history(members, offer_id, nr_coupons_to_send, historic
     members_with_outstanding = \
         set(filter(has_outstanding_coupon, members['id'].values))
 
-    if util_type == Util_Type.full_historical:
+    if util_type.value == Util_Type.full_historical.value:
         if tracktime: TrackTime("Recently accepted coupon")
         members_who_accepted_coupon_in_last_month = \
             set(filter(accepted_coupon_last_month, members['id'].values))
@@ -219,29 +219,32 @@ child_stages_def = {
     'volwassene':   [18,200],
     }
 
-def calculate_age_at(date_born, date_at):
-    return date_at.year - date_born.year - ((date_at.month, date_at.day) < (date_born.month, date_born.day))
-
 
 def get_eligible_members_time_dependent(eligible_members, matching_context, all_partners, all_children, timestamp, verbose=False, tracktime=False):
     # TODO: inactivated_at, active, onboarded_at, receive_coupons_after, 'created_at'
+
+    date_at = timestamp.date()
+    def calculate_age_at(date_born):
+        return date_at.year - date_born.year - ((date_at.month, date_at.day) < (date_born.month, date_born.day))
+
 
     if tracktime: TrackTime("calc age")
     # Calculate age of members
     min_age = matching_context['member_criteria_min_age']
     max_age = matching_context['member_criteria_max_age']
     if not pd.isna(min_age) or not pd.isna(max_age):
-        members_age = eligible_members['date_of_birth'].apply(lambda born: calculate_age_at(born, timestamp.date()))
+        members_age = eligible_members['date_of_birth'].apply(lambda born: calculate_age_at(born))
+        members_age = members_age.values
 
     if tracktime: TrackTime("age criteria")
     # Minimum and maximum age criteria
     if not pd.isna(min_age) and not pd.isna(max_age):
-        age_in_range = np.logical_and((members_age >= min_age).values, (members_age <= max_age).values)
+        age_in_range = np.logical_and(members_age >= min_age, members_age <= max_age)
         eligible_members = eligible_members[age_in_range]
     elif not pd.isna(min_age):
-        eligible_members = eligible_members[(members_age >= min_age).values]
+        eligible_members = eligible_members[members_age >= min_age]
     elif not pd.isna(max_age):
-        eligible_members = eligible_members[(members_age <= max_age).values]
+        eligible_members = eligible_members[members_age <= max_age]
     if verbose: print("nr eligible_members age range:", len(eligible_members))
 
     if tracktime: TrackTime("setting up family criteria")
@@ -270,15 +273,18 @@ def get_eligible_members_time_dependent(eligible_members, matching_context, all_
 
     if tracktime: TrackTime("calc children age")
     rel_children = copy.copy(all_children[all_children['user_id'].isin(eligible_members['id'])])
-    rel_children['age'] = rel_children['date_of_birth'].apply(lambda born: calculate_age_at(born, timestamp.date()))
+    rel_children['age'] = rel_children['date_of_birth'].apply(lambda born: calculate_age_at(born))
     rel_children = rel_children[rel_children['age'] >= 0]
 
-    if tracktime: TrackTime("calc children count")
+    TrackTime("Calc children count")
     # Count number of children with age >= 0
-    children_counts = rel_children.groupby('user_id').aggregate(children_count=('id','count')).reset_index().rename(columns={'user_id':'id'})
+    children_counts = Counter(rel_children['user_id'])
+    children_counts = pd.DataFrame(children_counts.items(), columns=['id','children_count'])#.sort_values('id')
+    # children_counts = rel_children.groupby('user_id').aggregate(children_count=('id','count')).reset_index().rename(columns={'user_id':'id'})
     # Merge children_count column into members table, and put members without chilldren on zero count
-    eligible_members = pd.merge(eligible_members, children_counts, how='left', on='id')
-    eligible_members['children_count'] = eligible_members['children_count'].fillna(0).astype(int)
+    eligible_members = pd.merge(eligible_members, children_counts, how='left', on='id').fillna(0)
+    eligible_members['children_count'] = eligible_members['children_count'].astype(int)
+    TrackTime("Get all eligible members time")
 
     if tracktime: TrackTime("calc family_count")
     # Calculate family count
