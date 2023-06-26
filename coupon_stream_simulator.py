@@ -11,6 +11,7 @@ import sys
 import enum
 import copy
 import json
+import pickle
 import numpy as np
 import pandas as pd
 import datetime as dt
@@ -43,19 +44,25 @@ class Util_Type(enum.Enum):
 
 
 def main():
-    conn = connect_db.establish_host_connection()
-    db   = connect_db.establish_database_connection(conn)
-    print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
-
     # convert_events_pkl_to_excel(57,0)
     # sys.exit()
 
-    util_prep, data_prep = prepare_simulation_data(db)
+    USE_DB = False
+    if USE_DB:
+        conn = connect_db.establish_host_connection()
+        db   = connect_db.establish_database_connection(conn)
+        print("Successfully connected to database '%s'"%str(db.engine).split("/")[-1][:-1])
 
-    NR_SIMULATIONS = 100
+        util_prep, data_prep = prepare_simulation_data(db)
+        db.close()
+    else:
+        util_prep, data_prep = prepare_simulation_data(None)
+
+
+    NR_SIMULATIONS = 50
     ALLOCATOR_ALGORITHMS = ['greedy']
-    BATCH_SIZES = [1,50,200]
-    UTILITY_TYPES = [Util_Type.time_discounted, Util_Type.full_historical, Util_Type.partial_historical]
+    UTILITY_TYPES = [Util_Type.full_historical]
+    BATCH_SIZES = [1]
 
     # for batch_size, alloc_alg, util_type in zip(BATCH_SIZES, ALLOCATOR_ALGORITHMS, UTILITY_TYPES):
     for alloc_alg in ALLOCATOR_ALGORITHMS:
@@ -726,9 +733,26 @@ def read_utility(members=None, offers=None):
     return utility_values, utility_indices
 
 
-def prepare_simulation_data(db):
-    result = query_db.retrieve_from_sql_db(db, 'filtered_coupons', 'filtered_issues', 'filtered_offers', 'member')
-    filtered_coupons, filtered_issues, filtered_offers, all_members = result
+def prepare_simulation_data(db=None):
+    if db:
+        result = query_db.retrieve_from_sql_db(db, 'filtered_coupons', 'filtered_issues', 'filtered_offers', 'member')
+        filtered_coupons, filtered_issues, filtered_offers, all_members = result
+
+        query = "select * from member_category"
+        all_member_categories = pd.read_sql_query(query, db)
+        query = "select * from member_family_member where type='child'"
+        all_children = pd.read_sql_query(query, db)
+        query = "select * from member_family_member where type='partner'"
+        all_partners = pd.read_sql_query(query, db)
+
+    else:
+        with open('./database/data/filtered_coupons.pkl', 'rb') as fp:      filtered_coupons        = pickle.load(fp)
+        with open('./database/data/filtered_issues.pkl', 'rb') as fp:       filtered_issues         = pickle.load(fp)
+        with open('./database/data/filtered_offers.pkl', 'rb') as fp:       filtered_offers         = pickle.load(fp)
+        with open('./database/data/all_members.pkl', 'rb') as fp:           all_members             = pickle.load(fp)
+        with open('./database/data/all_member_categories.pkl', 'rb') as fp: all_member_categories   = pickle.load(fp)
+        with open('./database/data/all_children.pkl', 'rb') as fp:          all_children            = pickle.load(fp)
+        with open('./database/data/all_partners.pkl', 'rb') as fp:          all_partners            = pickle.load(fp)
 
     # No functionality to incorporate 'aborted_at' has been made (so far)
     assert np.all(filtered_issues['aborted_at'].isna())
@@ -763,12 +787,7 @@ def prepare_simulation_data(db):
     datetimes = filtered_issues['sent_at'].dt.to_pydatetime()
     filtered_issues['sent_at'] = pd.Series(datetimes, index=filtered_issues.index, dtype=object)
 
-    query = "select * from member_category"
-    all_member_categories = pd.read_sql_query(query, db)
-    query = "select * from member_family_member where type='child'"
-    all_children = pd.read_sql_query(query, db)
-    query = "select * from member_family_member where type='partner'"
-    all_partners = pd.read_sql_query(query, db)
+
     supporting_info = (filtered_offers, all_member_categories, all_children, all_partners)
 
     # Calculate the global probability that a member lets a coupon expire, given that he does not accept the coupon
