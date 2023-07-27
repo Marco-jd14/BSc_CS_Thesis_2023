@@ -22,11 +22,22 @@ Then, you can run the command `ALTER USER 'root'@'localhost' IDENTIFIED BY 'my_n
 After making sure the HOST_ARGS are correct, the script should successfully create and fill a database from scratch, making it ready to be queried from other scripts (i.e. `query_db.py`)
 
 ## Data prepping
-With the database initialized, it is not possible to have an easier look at the data and prepare it for usage.
+With the database initialized, it is now possible to have an easier look at the data and prepare it for usage.
 This is exactly what the script `filter_and_check_data.py` does in the `database` folder.
 It filters out irrelevant data, and then further cleans up the data by checking for inconsistencies.
 When the script is done, it writes the cleaned-up data back to the database, to new tables.
 The filtered data can then be easily retrieved from the database in other scripts.
 
+# Simulating a Coupon Allocation Policy
+The file `IssueStreamSimulator` contains a class that, as the name implies, simulates the allocation of a stream of issues.
+The script `run_experiments` creates an instance of the Simulator class, and then runs the simulation.
+Before being able to start a simulation, the correct data has to be provided, an export location chosen, and three properties of the allocation policy have to be set.
+These three properties are the Minimum Batch Size, Historical Context Type, and Allocation Procedure.
+The available Allocation Procedures are provided in the script `allocation_procedures`.
 
-# Coupon Allocation Algorithms
+# Evaluating a simulation
+The simulator will export a timeline of (simulated) events to one or multiple files.
+These files can be read again, and information from the events can be deducted.
+This is done in the script `evaluate_timeline`, which creates a table with interesting information and makes graphs showing results.
+To compare the results of a simulation with the allocation policy currently implemented by Quiet which resulted in the data, the script
+`make_baseline_timeline` first has to be run. Then, this baseline timeline can be evaluated in a similar way to simulated timelines, and results can be compared.

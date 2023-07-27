@@ -24,7 +24,7 @@ import database.connect_db as connect_db
 import database.query_db as query_db
 from database.query_db import Event
 from IssueStreamSimulator import IssueStreamSimulator
-from allocator_algorithms import greedy, max_sum_utility, maximin_utility
+from allocation_procedures import greedy, max_sum_utility, maximin_utility
 
 # Set seed if results have to be repeatable
 # np.random.seed(0)
