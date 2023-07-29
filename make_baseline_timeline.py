@@ -5,6 +5,7 @@ Created on Mon May  1 11:47:01 2023
 @author: Marco
 """
 
+import os
 import sys
 import copy
 import numpy as np
@@ -12,14 +13,17 @@ import pandas as pd
 import datetime as dt
 from database.lib.tracktime import TrackTime, TrackReport
 
-from coupon_stream_simulator import determine_coupon_checked_expiry_time
+from IssueStreamSimulator import IssueStreamSimulator
 import database.connect_db as connect_db
 import database.query_db as query_db
-Event = query_db.Event
+from database.query_db import Event
 
 pd.set_option('display.max_rows', 200)
 pd.set_option('display.max_columns', 100)
-pd.set_option('display.width', 130)
+pd.set_option('display.width', 80)
+
+np.random.seed(0)
+EXPORT_FOLDER = './timelines/'
 
 
 def main():
@@ -33,34 +37,27 @@ def main():
     filtered_coupons, filtered_issues, filtered_offers = result
 
 
-    make_baseline_events_from_scratch  = True
-
-
-    if make_baseline_events_from_scratch:
+    MAKE_BASELINE_EVENTS_FROM_SCRATCH = False
+    if MAKE_BASELINE_EVENTS_FROM_SCRATCH or not os.path.exists(os.path.join(EXPORT_FOLDER, 'baseline_events.pkl')):
         events_df = make_events_timeline(filtered_coupons, filtered_issues, filtered_offers)
-        print(events_df)
-
-        print("")
-        total_decay  = np.sum(events_df['event'] == Event.coupon_expired)
-        total_amount = np.sum(filtered_issues['amount'])
-        print('Total number of coupons: %d'%total_amount)
-        print('Total number of coupons never accepted: %d'%total_decay)
-        print('Percentage of coupons never accepted: %.1f%%'%(total_decay/total_amount*100))
-
-        TrackTime("to_csv")
-        events_df.to_csv('./timelines/baseline_events.csv', index=False)
         events_df.to_pickle('./timelines/baseline_events.pkl')
     else:
-        TrackTime("read_csv")
-        events_df = pd.read_csv('./baseline_events.csv', parse_dates=['at'])
+        TrackTime("Read pickle")
+        events_df = pd.read_pickle(os.path.join(EXPORT_FOLDER, 'baseline_events.pkl'))
         events_df['event'] = events_df['event'].apply(lambda event: Event[str(event).replace('Event.','')])
         events_df = events_df.convert_dtypes()
-        # print(events_df)
+
+    print("")
+    decayed = events_df[events_df['event'] == Event.coupon_expired]
+    accepted = events_df[events_df['event'] == Event.member_accepted]
+    total_amount = np.sum(filtered_issues['amount'])
+    print('Total number of coupons: %d'%total_amount)
+    print('Total number of coupons accepted: %d'%len(accepted))
+    print('Total number of coupons never accepted: %d'%len(decayed))
+    print('Percentage of coupons never accepted (trash bin): %.1f%%'%(len(decayed)/total_amount*100))
 
     print("")
     TrackReport()
-
-    # print_table_info(db)
 
     # Close the connection to the database
     db.close()
@@ -80,7 +77,6 @@ def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
     # Calculate the times it took for members to decline a coupon.
     declined_coupons = filtered_coupons[np.logical_and(filtered_coupons['status'] == 'declined', filtered_coupons['sub_status'] != "after_accepting")]
     declined_durations = declined_coupons['status_updated_at'] - declined_coupons['created_at']
-    print("\nDeclined coupons:", len(declined_coupons), declined_durations.mean(), "\n")
 
     # Store the following information during the event-generation in a dict (not df) for optimization:
     issue_info = pd.DataFrame(index=filtered_issues['id'])
@@ -93,41 +89,39 @@ def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
     filtered_offers.index = filtered_offers['id']
 
     # To measure how well the function 'determine_coupon_checked_expiry_time' calculates the actual 'status_updated_at' time after a member letting a coupon expire
-    incorrectly_predicted_created_after_expiry = 0
+    incorrectly_predicted_expiries = 0
     events_list = []
     events_df = pd.DataFrame(columns=['event','at','member_id','coupon_id','coupon_follow_id','issue_id','offer_id', 'category_id'])
 
+    set_issue_follow_ids = set()
+
+    print("")
+    TrackTime("Iterrows")
     for i, (index, coupon_row) in enumerate(filtered_coupons.iterrows()):
+        if i%100 == 0:
+            print("\rHandling coupon nr %d (%.1f%%)"%(i, 100*i/len(filtered_coupons)),end='')
 
-        TrackTime("print")
-        if i%1000 == 0:
-            print("\rHandling coupon nr %d"%i,end='')
-
-        TrackTime("ids_in_event")
+        TrackTime("Define ids in event")
         ids_in_event = [coupon_row['member_id'], coupon_row['id'], coupon_row['coupon_follow_id'], coupon_row['issue_id'], coupon_row['offer_id']]
 
-        TrackTime("append")
+        TrackTime("Update issue_info")
+        element = (coupon_row['issue_id'], coupon_row['coupon_follow_id'])
+        set_issue_follow_ids.update(set([element]))
+        issue_info[coupon_row['issue_id']]['nr_issued_so_far'] += 1
+
+        TrackTime("Append events")
         # Add the coupon sent event
         event = [Event.coupon_sent, coupon_row['created_at']] + ids_in_event + [filtered_offers.loc[coupon_row['offer_id'],'category_id']]
         events_list.append(event)
 
-        TrackTime('check time')
-        if issue_info[coupon_row['issue_id']]['nr_issued_so_far'] == 0:
-            issue_sent_at = filtered_issues.loc[coupon_row['issue_id'],'sent_at']
-            assert abs(coupon_row['created_at'] - issue_sent_at) < dt.timedelta(seconds=30), "Issue was sent at %s, but first coupon created at %s"%(coupon_row['created_at'], issue_sent_at)
-
-        TrackTime("update issue_info")
-        issue_info[coupon_row['issue_id']]['nr_issued_so_far'] += 1
-
-        TrackTime("timestamp")
+        TrackTime("Time of member response")
         member_response = coupon_row['member_response']
         if member_response == Event.member_let_expire:
             # If a member let the coupon expire or declined the coupon, the status of the coupon
             # has not been updated since this action. Therefore, we know the exact time of the action
             datetimestamp = coupon_row['status_updated_at']
 
-            TrackTime("Check expected timestamp")
-            checked_expiries = determine_coupon_checked_expiry_time(coupon_row['created_at'], coupon_row['accept_time'], check=True)
+            checked_expiries = IssueStreamSimulator.determine_coupon_checked_expiry_time(coupon_row['created_at'], coupon_row['accept_time'], check=True)
             if checked_expiries is None:
                 checked_expiries = [datetimestamp]
 
@@ -136,7 +130,7 @@ def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
                 if abs(datetimestamp - checked_expiry) < dt.timedelta(minutes=10):
                     predicted_correctly = True
             if not predicted_correctly:
-                incorrectly_predicted_created_after_expiry += 1
+                incorrectly_predicted_expiries += 1
                 # print("\nCoupon created at: %s, expired at: %s, status updated at:%s"%(coupon_row['created_at'], coupon_row['created_at'] + dt.timedelta(days=coupon_row['accept_time']), datetimestamp))
 
         elif member_response == Event.member_declined:
@@ -145,50 +139,47 @@ def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
             # If the member accepts the coupon, this tatus will eventually be updated by i.e. redeemed
             # Therefore, make a random guess as to when the member accepted.
             # Assume the time for accepting has the same distribution as the time for declining
-            # TODO: filter declined_durations <= accept_time
-            TrackTime("random datetimestamp")
-            # valid_declined_durations = declined_durations[declined_durations <= coupon_row['accept_time'].apply(lambda el: dt.timedelta(days=el))]
             index = np.random.randint(len(declined_durations))
             accepted_duration = declined_durations.iloc[index]
             datetimestamp = coupon_row['created_at'] + accepted_duration
 
-        TrackTime("append")
+        TrackTime("Append events")
         # Add the member-response event
         event = [member_response, datetimestamp] + ids_in_event + [filtered_offers.loc[coupon_row['offer_id'],'category_id']]
         events_list.append(event)
 
-        TrackTime("update issue_info")
+        TrackTime("Update issue_info")
         if member_response == Event.member_accepted:
-            # filtered_issues.loc[coupon_row['issue_id'],'nr_accepted_so_far'] += 1
             issue_info[coupon_row['issue_id']]['nr_accepted_so_far'] += 1
 
         # check of event coupon_expired heeft plaatsgevonden
-        TrackTime("check coupon expiry")
-        if member_response != Event.member_accepted:
+        TrackTime("Check coupon expiry")
+        if issue_info[coupon_row['issue_id']]['nr_issued_so_far'] == filtered_issues.loc[coupon_row['issue_id'],'total_issued']:
 
-            if issue_info[coupon_row['issue_id']]['nr_issued_so_far'] == filtered_issues.loc[coupon_row['issue_id'],'total_issued']:
+            # This coupon_row is the last row in which a coupon with this issue_id appears
+            decay_nr = filtered_issues.loc[coupon_row['issue_id'],'amount'] - issue_info[coupon_row['issue_id']]['nr_accepted_so_far']
+            issue_coupons = filtered_coupons[filtered_coupons['issue_id'] == coupon_row['issue_id']] 
+            issue_coupons_accepted = issue_coupons[issue_coupons['member_response'] == Event.member_accepted]
+            accepted_follow_ids = set(issue_coupons_accepted['coupon_follow_id'])
+            non_accepted_follow_ids = set(np.arange(1, 1+filtered_issues.loc[coupon_row['issue_id'],'amount'])) - accepted_follow_ids
+            assert len(non_accepted_follow_ids) == decay_nr
+            assert set(issue_coupons['coupon_follow_id']) == accepted_follow_ids.union(non_accepted_follow_ids)
 
-                # This coupon_row is the last row in which a coupon with this issue_id appears
-                decay_nr = filtered_issues.loc[coupon_row['issue_id'],'amount'] - issue_info[coupon_row['issue_id']]['nr_accepted_so_far']
-                issue_coupons = filtered_coupons[filtered_coupons['issue_id'] == coupon_row['issue_id']] 
-                issue_coupons_accepted = issue_coupons[issue_coupons['member_response'] == Event.member_accepted]
-                accepted_follow_ids = set(issue_coupons_accepted['coupon_follow_id'])
-                non_accepted_follow_ids = set(np.arange(filtered_issues.loc[coupon_row['issue_id'],'amount'])) - accepted_follow_ids
-                assert len(non_accepted_follow_ids) == decay_nr
+            if decay_nr > 0:
+                TrackTime("Append events")
+                event = [Event.coupon_expired, filtered_issues.loc[coupon_row['issue_id'],'expires_at'], np.nan, np.nan, coupon_row['coupon_follow_id'], coupon_row['issue_id'], coupon_row['offer_id'], filtered_offers.loc[coupon_row['offer_id'],'category_id']]
+                events = []
+                for follow_id in non_accepted_follow_ids:
+                    event[4] = follow_id
+                    events.append(copy.copy(event))
+                events_list.extend(events)
 
-                if decay_nr > 0:
-                    TrackTime("append")
-                    event = [Event.coupon_expired, filtered_issues.loc[coupon_row['issue_id'],'expires_at'], np.nan, np.nan, coupon_row['coupon_follow_id'], coupon_row['issue_id'], coupon_row['offer_id'], filtered_offers.loc[coupon_row['offer_id'],'category_id']]
-                    events = []
-                    for follow_id in non_accepted_follow_ids:
-                        event[4] = follow_id
-                        events.append(copy.copy(event))
-                    events_list.extend(events)
+        TrackTime("Iterrows")
 
+    print("\rHandling coupon nr %d (%.1f%%)"%(i, 100))
+    print("Incorrectly predicted coupon expiry times: %d (%.2f%%)"%(incorrectly_predicted_expiries, 100*incorrectly_predicted_expiries/len(filtered_coupons)))
 
-    print("\nincorrectly_predicted_created_after_expiry:", incorrectly_predicted_created_after_expiry)
-
-    print("\n")
+    # Turns events list into a dataframe
     events_df = pd.DataFrame(events_list, columns=events_df.columns)
 
     # Assign new unique coupon follow ids
@@ -212,28 +203,6 @@ def make_events_timeline(filtered_coupons, filtered_issues, filtered_offers):
 
     events_df = events_df.convert_dtypes()
     return events_df
-
-
-
-
-
-
-def print_table_info(db):
-    tables = ['filtered_coupons', 'filtered_issues', 'offer', 'member']
-    # all_tables = pd.read_sql_query("show tables", db).squeeze().values
-
-    for table_name in tables:
-        print("\n\nTABLE", table_name)
-        query = "SELECT * FROM %s"%table_name
-        df = pd.read_sql_query(query, db)
-
-        for col in df.columns:
-            unique_values = pd.unique(df[col].values)
-            if len(unique_values) < 10:
-                print("\t", col, type(unique_values[0]), len(unique_values), unique_values, unique_values[0])
-            else:
-                print("\t", col, type(unique_values[0]), len(unique_values), unique_values[0])
-
 
 
 if __name__ == '__main__':

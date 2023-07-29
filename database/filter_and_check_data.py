@@ -13,17 +13,18 @@ import numpy as np
 import pandas as pd
 import datetime as dt
 import matplotlib.pyplot as plt
+plt.style.use('seaborn')
 from dateutil.relativedelta import relativedelta
 from lib.tracktime import TrackTime, TrackReport
 
 import connect_db
 import query_db
-Event = query_db.Event
+from query_db import Event
 
 # For printing dataframes
 pd.set_option('display.max_rows', 200)
 pd.set_option('display.max_columns', 100)
-pd.set_option('display.width', 120)
+pd.set_option('display.width', 100)
 
 
 # All the possible combinations of status + sub_status found in the data
@@ -33,7 +34,9 @@ status_to_event = {('declined',  None):              Event.member_declined,
                    ('expired',  'after_accepting'):  Event.member_accepted,
                    ('expired',  'not_redeemed'):     Event.member_accepted,
                    ('redeemed',  None):              Event.member_accepted,
-                   ('redeemed', 'after_expiring'):   Event.member_accepted}
+                   ('redeemed', 'after_expiring'):   Event.member_accepted,
+                   ('accepted',  None):              None,
+                   ('pending',   None):              None}
 
 
 def main():
@@ -56,10 +59,13 @@ def main():
 
     print("\nfiltered_coupons table from db shape:", filtered_coupons.shape)
     print("filtered_issues table from db shape:", filtered_issues.shape)
-    print("filtered_offers table from db shape:", filtered_offers.shape)
+    print("filtered_offers table from db shape:", filtered_offers.shape, "\n")
 
     # Plot a timeline
-    plot_timeline_active_coupons(filtered_coupons)
+    PLOT_TIMELINES = False
+    if PLOT_TIMELINES:
+        plot_timeline_active_coupons(filtered_coupons)
+        plot_timeline_active_coupons(query_db.retrieve_from_sql_db(db, 'coupon')[0])
 
     print("")
     TrackReport()
@@ -94,6 +100,7 @@ def filter_and_check_data(db, save_to_SQL_DB=False):
 
     print("\nBefore filtering:")
     print("nr coupons:", len(all_coupons))
+    print("nr unique coupons:", all_issues['amount'].sum())
     print("nr issues:", len(all_issues))
     print("nr offers:", len(all_offers))
 
@@ -103,6 +110,7 @@ def filter_and_check_data(db, save_to_SQL_DB=False):
 
     print("\nAfter filtering:")
     print("nr coupons:", len(filtered_coupons))
+    print("nr unique coupons:", filtered_issues['amount'].sum())
     print("nr issues:", len(filtered_issues))
     print("nr offers:", len(filtered_offers))
 
@@ -112,7 +120,7 @@ def filter_and_check_data(db, save_to_SQL_DB=False):
 
     print("\nInvestigating issue-consistencies")
     # Add extra information to the coupons and issues table
-    filtered_coupons, filtered_issues = add_coupon_follow_ids_to_coupons(filtered_coupons, filtered_issues, filtered_offers, verbose=True)
+    filtered_coupons, filtered_issues = add_coupon_follow_ids_to_coupons(filtered_coupons, filtered_issues, filtered_offers, False, False)
 
     # With the newly added information, filter out more data
     print("\nFiltering out inconsistent issues")
@@ -121,6 +129,7 @@ def filter_and_check_data(db, save_to_SQL_DB=False):
 
     print("\nAfter follow_coupon_id data filtering:")
     print("nr coupons:", len(filtered_coupons), "  (%d columns)"%len(filtered_coupons.columns))
+    print("nr unique coupons:", filtered_issues['amount'].sum())
     print("nr issues:", len(filtered_issues), "  (%d columns)"%len(filtered_issues.columns))
     print("nr offers:", len(filtered_offers), "  (%d columns)"%len(filtered_offers.columns))
     print("")
@@ -550,23 +559,50 @@ def datetime_range(start_date, end_date, delta):
 
 
 def plot_timeline_active_coupons(df):
-    created = df['created_at']
-    created = created.sort_values(ascending=True)
-    assert created.is_monotonic
+    plt.figure(figsize=(8,6))
+    df = copy.copy(df[df['type'] == 'Coupon'])
+    df['member_response'] = df.apply(lambda row: status_to_event[(row['status'], row['sub_status'])], axis=1)
 
-    start_date = created.iloc[0] - dt.timedelta(seconds=1)
-    end_date   = created.iloc[-1] + dt.timedelta(seconds=1)
-    delta = {'days':7}
-    intervals = datetime_range(start_date, end_date, delta)
+    df = df.sort_values('created_at')
+    start_date = (df['created_at'].iloc[0] - dt.timedelta(seconds=1)).to_pydatetime()
+    end_date   = (df['created_at'].iloc[-1] + dt.timedelta(seconds=1)).to_pydatetime()
+    if start_date.year < 2017 and end_date.year > 2023:
+        start_date = dt.datetime.strptime("2016-05-01 00:00:00", "%Y-%m-%d %H:%M:%S")
+        end_date = dt.datetime.strptime("2023-03-31 23:59:59", "%Y-%m-%d %H:%M:%S")
 
-    res = created.groupby(pd.cut(created, intervals)).count()
-    res.name = "nr_coupons_per_interval"
-    res = res.reset_index()
+    accepted = df[df['member_response'] == Event.member_accepted]
+    declined = df[df['member_response'] == Event.member_declined ]
+    let_expire = df[df['member_response'] == Event.member_let_expire]
 
-    interval_ends = list(map(lambda interval: interval.right, res.created_at))
-    plt.plot(interval_ends, res.nr_coupons_per_interval)
-    plt.xticks(fontsize=8)
+    colors = ['#d6a10d', '#4cb099', '#631818']
+    names =  ['accepted', 'declined', 'let expire']
+    dfs_to_plot = [accepted, declined, let_expire]
+    prev_df = None
+    for i, df in enumerate(dfs_to_plot):
+        created = df['created_at']
+        created = created.sort_values(ascending=True)
 
+        delta = {'months':1}
+        intervals = datetime_range(start_date, end_date, delta)
+
+        grouped_data = created.groupby(pd.cut(created, intervals)).count()
+        grouped_data.name = "nr_coupons_per_interval"
+        grouped_data = grouped_data + prev_df if prev_df is not None else grouped_data
+        grouped_data_copy = copy.copy(grouped_data)
+        grouped_data = grouped_data.reset_index()
+
+        interval_ends = list(map(lambda interval: interval.right, grouped_data.created_at))
+        plt.fill_between(interval_ends, 0 if i == 0 else prev_df.values, grouped_data.nr_coupons_per_interval, label=names[i], color=colors[i], alpha=1)
+        prev_df = grouped_data_copy
+
+    plt.xticks(fontsize=15)
+    plt.yticks(fontsize=15)
+    plt.ylabel("Number of coupons", fontsize=15)
+    plt.legend(loc='upper left', fontsize=15)
+    xmin, xmax, ymin, ymax = plt.axis()
+    plt.ylim([0,ymax])
+
+    # plt.savefig("./plots/filtering_coupons", bbox_inches='tight', pad_inches=0.05, dpi=150)
 
 
 def print_table_info(db):
