@@ -46,6 +46,11 @@ EXPORT_FOLDER = './timelines/'
 
 
 def main():
+    """
+    Function that first initializes a simulation by retrieving the necessary data,
+    and then runs a bunch of simulations
+    """
+
     # Retrieve and prepare the required data for the simulator
     USE_DB = True
     if USE_DB:
@@ -88,6 +93,44 @@ def main():
 
 
 def prepare_simulation_data(db=None):
+    """ Function that retrieves / computes all the necessary data to be able to start a simulation
+
+    Parameters
+    ----------
+    db : sqlalchemy.engine.base.Connection, optional
+        The data can either be retrieved from a MySQL database, or from local .pkl files
+
+    Returns
+    -------
+    utility_df : pd.DataFrame
+        Same as P_accept_df
+
+    P_accept_df : pd.DataFrame
+        A dataframe with columns the offer-ids, and the index are the member-ids. Each combination of
+        member x offer has a value, corresponding to the probability of that member accepting a coupon from that offer
+
+    coupon_prep : tuple, containing:
+        filtered_issues : pd.DataFrame
+            A list of issues over a certain timeline, which are to be allocated
+        filtered_offers : pd.DataFrame
+            Each issue from 'filtered_issues' corresponds to an offer with a set of criteria, i.e. 'minimum_age >= 18'
+            Also includes which category the offer is a part of
+
+    member_prep : tuple, containing:
+        all_members : pd.DataFrame
+            Information mapping a member-id on date of birth, gender, active, etc.
+        all_member_categories : pd.DataFrame
+            A table mapping which members are 'subscribed' to which category
+        all_family_members : pd.DataFrame
+            A table mapping which members have registered a partner or child
+        P_let_expire_given_not_accepted : float
+            A single value, to be interpreted as the probability that a randomly selected member
+            does not respond to an offer, given that we already know the member will not accept the offer
+        decline_times : np.array, 1 dimensional
+            A list of decline times, which expresses how long a member has taken before declining an offer
+            as a percentage of the total given time to respond to the offer
+    """
+
     if db is not None:
         # Retrieve from database
         result = query_db.retrieve_from_sql_db(db, 'filtered_coupons', 'filtered_issues', 'filtered_offers')
@@ -217,6 +260,27 @@ def prepare_simulation_data(db=None):
 
 
 def calc_accept_probabilities(member_ids, offer_ids, filtered_coupons):
+    """ This function was written as super basic alternative to a recommendation system
+    The accept probabilities should actually be computed by a recommendation system as this
+    would lead to more robustly tested probabilities.
+    The filtered_coupons dataframe is analyzed to determine how many coupons each member has accepted and not accepted,
+    as well as per offer how many coupons were accepted or were not accepted
+
+    Parameters
+    ----------
+    member_ids : pd.Series
+        A column of a dataframe with all possible IDs of members
+    offer_ids : pd.Series
+        A column of a dataframe with all possible IDs of offers
+    filtered_coupons : pd.DataFrame
+        A dataframe with at least the following columns: ['member_id','offer_id','member_response','id']  ('id' refers to coupon_id)
+
+    Returns
+    -------
+    P_accept_df : pd.DataFrame
+        A dataframe with columns the offer-ids, and the index are the member-ids. Each combination of
+        member x offer has a value, corresponding to the probability of that member accepting a coupon from that offer
+    """
 
     # Calculate per member how many coupons have been accepted or not, and per offer how many coupons have been accepted or not
     member_scores = filtered_coupons[['member_id','member_response','id']].pivot_table(index=['member_id'], columns='member_response', aggfunc='count', fill_value=0)['id'].reset_index()

@@ -35,6 +35,20 @@ class IssueStreamSimulator:
 
 
     def set_resource_data(self, utility_df, issues, offers):
+        """ Function that saves data on issues and offers as attribute
+        It splits up the utility_df into its values, columns, and index into separate attributes
+
+        Parameters
+        ----------
+        utility_df : pd.DataFrame
+            A dataframe with columns the offer-ids, and the index are the member-ids. Each combination of
+            member x offer has a value, corresponding to the increase in utility of that member accepting a coupon from that offer
+        issues : pd.DataFrame
+            A list of issues over a certain timeline, which are to be allocated by the simulation
+        offers : pd.DataFrame
+            Each issue from 'filtered_issues' corresponds to an offer with a set of criteria, i.e. 'minimum_age >= 18'
+            Also includes which category the offer is a part of
+        """
         self.utility_df = copy.copy(utility_df)
         self.issues     = copy.copy(issues)
         self.offers     = copy.copy(offers)
@@ -53,6 +67,26 @@ class IssueStreamSimulator:
 
     def set_agent_data(self, P_accept_df, members, member_categories, family_members,
                         P_let_expire_given_not_accepted, decline_times):
+        """ Function that saves data on members as attribute. It splits up family members into children and partners
+
+        Parameters
+        ----------
+        P_accept_df : pd.DataFrame
+            A dataframe with columns the offer-ids, and the index are the member-ids. Each combination of
+            member x offer has a value, corresponding to the probability of that member accepting a coupon from that offer
+        members : pd.DataFrame
+            Information mapping a member-id on date of birth, gender, active, etc.
+        member_categories : pd.DataFrame
+            A table mapping which members are 'subscribed' to which category
+        family_members : pd.DataFrame
+            A table mapping which members have registered a partner or child
+        P_let_expire_given_not_accepted : float
+            A single value, to be interpreted as the probability that a randomly selected member
+            does not respond to an offer, given that we already know the member will not accept the offer
+        decline_times : np.array, 1 dimensional
+            A list of decline times, which expresses how long a member has taken before declining an offer
+            as a percentage of the total given time to respond to the offer
+        """
         self.members           = copy.copy(members)
         self.member_categories = copy.copy(member_categories)
         self.children          = copy.copy(family_members[family_members['type'] == 'child'].reset_index(drop=True))
@@ -64,6 +98,21 @@ class IssueStreamSimulator:
 
     def set_alloc_policy_properties(self, min_batch_size=None, alloc_procedure=None,
                                     historical_context_type=None):
+        """ This function allows tweaking the three properties which can vary between simulation
+        These properties include:
+
+        Parameters
+        ----------
+        min_batch_size : int
+            The minimum number of coupons which have to available for sending out before the simulation can send out the next batch
+        alloc_procedure : dict[str --> function]
+            A dictionary with a single key, which is the name of the allocation procedure, and the function
+            that is an offline allocation procedure, operating on a single batch of coupons. The only input to the function
+            is a rectangular matrix of utilities
+        historical_context_type : run_experiments.Historical_Context_Type
+            A Historical_Context_Type enum.Enum instance, which declares how information about member's
+            historically received coupons should be incorporated into the allocation policy
+        """
         self.min_batch_size          = min_batch_size
         self.alloc_procedure_name    = list(alloc_procedure.keys())[0]
         self.alloc_procedure         = list(alloc_procedure.values())[0]
@@ -71,6 +120,9 @@ class IssueStreamSimulator:
 
 
     def set_simulation_properties(self, nr_simulations, export_folder):
+        """ Function that sets how many simulations are to be run with the same setting,
+        and where the results should be exported to
+        """
         self.nr_simulations = nr_simulations
 
         export_folder = export_folder.replace("/", "\\")
@@ -80,6 +132,15 @@ class IssueStreamSimulator:
 
 
     def start(self, extra_run_info={}, verbose=False):
+        """ After having called the functions 'set_resource_data', 'set_agent_data',
+        'set_alloc_policy_properties' and 'set_simulation_properties', this function starts the simulation
+        
+        Parameters
+        ----------
+        extra_run_info : dict
+            Gives the possibility to provide some more information on the type of simulation being run.
+            The dictionary will be saved under the 'run_info.json' file
+        """
         run_nr = self.get_next_available_run_nr()
         all_run_info = self.get_run_info(extra_run_info)
 
@@ -124,6 +185,14 @@ class IssueStreamSimulator:
 
 
     def simulate_once(self, verbose=False):
+        """ Function that performs a single simulation
+
+        Returns
+        -------
+        events_df : pd.DataFrame
+            A list of events that have happened in the simulation, sorted chronologically.
+            Columns include ['event','timestamp','coupon_id','coupon_follow_id','issue_id','offer_id','member_id','batch_id']
+        """
         self.init_new_sim()
 
         prev_batch_unsent_coupons = []
@@ -170,6 +239,24 @@ class IssueStreamSimulator:
 
 
     def send_out_new_batch(self, batch_counter, prev_batch_unsent_coupons, prev_batch_day_int, verbose):
+        """ Function that handles a batch:
+            - Extracts batch of coupons from the queue
+            - Filters the full matrix of utilities to the batch coupons and their eligible members
+            - Decides upon an allocation of the batch: which coupon is sent to which eligible member
+            - Simulate the member responses to the offered coupons
+            - Add not-accepted coupons back to the queue of coupons for allocation
+
+        Parameters
+        ----------
+        batch_counter : int
+        prev_batch_unsent_coupons : list[dict]
+        prev_batch_day_int : int
+
+        Returns
+        -------
+        unsent_coupons : list[dict]
+        batch_day_int : int
+        """
         # Determine which coupons are to be allocated in the current batch
         batch_to_send, batch_sent_at = self.extract_batch_from_queue(verbose)
 
@@ -207,7 +294,7 @@ class IssueStreamSimulator:
 
         # Simulate the member responses of those coupons that were sent out
         accepted_coupons, not_accepted_coupons = self.simulate_member_responses(allocated_member_coupon_pairs, batch_indices,
-                                                                                batch_to_send, batch_sent_at, actual_utility, verbose)
+                                                                                batch_to_send, batch_sent_at, verbose)
 
 
         # Check if not-accepted coupons can be re-allocated, or have expired
@@ -251,6 +338,24 @@ class IssueStreamSimulator:
 
 
     def re_release_non_accepted_coupons(self, not_accepted_coupons):
+        """ Determine whether the not-accepted coupons have now expired, or are ready to be added back to the queue
+
+        Parameters
+        ----------
+        not_accepted_coupons : list[dict]
+
+        Returns
+        -------
+        expired_coupons : list[dict]
+            A list of dictionaries, with each dictionary representing an event with the keys
+            ['event','timestamp','coupon_id','coupon_follow_id','issue_id','offer_id','member_id','batch_id']
+        came_available_coupons : list[dict]
+            A list of dictionaries, with each dictionary representing an event with the keys
+            ['event','timestamp','coupon_id','coupon_follow_id','issue_id','offer_id','member_id','batch_id']
+        add_to_queue : list[dict]
+            A list of dictionaries, with each dictionary representing a coupon to allocate with the keys
+            [        'timestamp','coupon_id','coupon_follow_id','issue_id','offer_id']
+        """
         # Check if non-accepted coupons can be re-allocated to new members
         came_available_coupons = []
         expired_coupons = []
@@ -268,7 +373,7 @@ class IssueStreamSimulator:
                 self.max_existing_coupon_id += 1
 
                 event = {'event': Event.coupon_available, 'timestamp':coupon_came_available_at, 'coupon_id':new_coupon_id, 'coupon_follow_id':not_accepted_coupon['coupon_follow_id'],
-                         'issue_id': not_accepted_coupon['issue_id'], 'offer_id':not_accepted_coupon['offer_id'], 'member_id':np.nan, 'batch_id':np.nan, 'expiry_type':np.nan}
+                         'issue_id': not_accepted_coupon['issue_id'], 'offer_id':not_accepted_coupon['offer_id'], 'member_id':np.nan, 'batch_id':np.nan}
                 came_available_coupons.append(event)
 
                 new_coupon = {'timestamp':coupon_came_available_at, 'coupon_id':new_coupon_id, 'coupon_follow_id':not_accepted_coupon['coupon_follow_id'],
@@ -277,7 +382,7 @@ class IssueStreamSimulator:
             else:
                 # Coupon is expired
                 event = {'event': Event.coupon_expired, 'timestamp':coupon_came_available_at, 'coupon_id':np.nan, 'coupon_follow_id':not_accepted_coupon['coupon_follow_id'],
-                         'issue_id': not_accepted_coupon['issue_id'], 'offer_id':not_accepted_coupon['offer_id'], 'member_id':np.nan, 'batch_id':np.nan, 'expiry_type':np.nan}
+                         'issue_id': not_accepted_coupon['issue_id'], 'offer_id':not_accepted_coupon['offer_id'], 'member_id':np.nan, 'batch_id':np.nan}
                 expired_coupons.append(event)
 
         return came_available_coupons, expired_coupons, add_to_queue
@@ -344,7 +449,26 @@ class IssueStreamSimulator:
                     return [checked_expiry]
 
 
-    def simulate_member_responses(self, allocated_member_coupon_pairs, batch_indices, batch_to_send, batch_sent_at, batch_utility, verbose):
+    def simulate_member_responses(self, allocated_member_coupon_pairs, batch_indices, batch_to_send, batch_sent_at, verbose):
+        """ Now that the allocation policy has chosen which coupons will be allocated to which members, let the members
+        choose whether they accept the allocated coupons. The reactions are simulated.
+
+        Parameters
+        ---------
+        allocated_member_coupon_pairs : tuple[list[int], list[int]]
+        batch_indices : tuple[dict[int --> int], dict[int --> int]]
+        batch_to_send : list[dict]
+        batch_sent_at : dt.datetime
+
+        Returns
+        -------
+        accepted_coupons : list[dict]
+            A list of dictionaries, with each dictionary representing an event with the keys
+            ['event','timestamp','coupon_id','coupon_follow_id','issue_id','offer_id','member_id','batch_id']
+        not_accepted_coupons : list[dict]
+            A list of dictionaries, with each dictionary representing an event with the keys
+            ['event','timestamp','coupon_id','coupon_follow_id','issue_id','offer_id','member_id','batch_id']
+        """
         # Unpack tuples
         batch_member_index_to_id, batch_coupon_index_to_id = batch_indices
         members_with_coupon_indices, allocated_coupon_indices = allocated_member_coupon_pairs
@@ -356,9 +480,6 @@ class IssueStreamSimulator:
         batch_offer_ids = list(map(lambda batch_coupon_index: batch_to_send[batch_coupon_index]['offer_id'], allocated_coupon_indices))
         all_offer_index = list(map(lambda offer_id: all_offer_ids_to_index[offer_id], batch_offer_ids))
         accept_probabilites = self.P_accept_df.values[all_member_index, all_offer_index]
-        # Utilities are (for now) equal to probability of accepting. Test for this.
-        accept_probabilites2 = batch_utility[members_with_coupon_indices, allocated_coupon_indices]
-        assert np.all(accept_probabilites == accept_probabilites2)
 
 
         # Simulate if coupon will be accepted or not
@@ -375,7 +496,7 @@ class IssueStreamSimulator:
             accept_time = batch_sent_at + dt.timedelta(days=float(accept_time)) * self.decline_times[random_indices[i]]
 
             accepted_coupon = {'event': Event.member_accepted, 'timestamp':accept_time, 'coupon_id':coupon['coupon_id'], 'coupon_follow_id':coupon['coupon_follow_id'],
-                               'issue_id': coupon['issue_id'], 'offer_id':coupon['offer_id'], 'member_id':batch_member_index_to_id[batch_member_index], 'batch_id':np.nan, 'expiry_type':np.nan}
+                               'issue_id': coupon['issue_id'], 'offer_id':coupon['offer_id'], 'member_id':batch_member_index_to_id[batch_member_index], 'batch_id':np.nan}
             accepted_coupons.append(accepted_coupon)
 
 
@@ -395,12 +516,12 @@ class IssueStreamSimulator:
                 expire_time = self.determine_coupon_checked_expiry_time(batch_sent_at, float(accept_time))
                 expire_time = expire_time[0] # Take first of suggested possible expiry times
                 event = {'event': Event.member_let_expire, 'timestamp':expire_time, 'coupon_id':coupon['coupon_id'], 'coupon_follow_id':coupon['coupon_follow_id'],
-                         'issue_id': coupon['issue_id'], 'offer_id':coupon['offer_id'], 'member_id':batch_member_index_to_id[batch_member_index], 'batch_id':np.nan, 'expiry_type':np.nan}
+                         'issue_id': coupon['issue_id'], 'offer_id':coupon['offer_id'], 'member_id':batch_member_index_to_id[batch_member_index], 'batch_id':np.nan}
             else:
                 accept_time = self.offers.loc[coupon['offer_id'], 'accept_time']
                 decline_time = batch_sent_at + dt.timedelta(days=float(accept_time)) * self.decline_times[random_indices[i]]
                 event = {'event': Event.member_declined, 'timestamp':decline_time, 'coupon_id':coupon['coupon_id'], 'coupon_follow_id':coupon['coupon_follow_id'],
-                         'issue_id': coupon['issue_id'], 'offer_id':coupon['offer_id'], 'member_id':batch_member_index_to_id[batch_member_index], 'batch_id':np.nan, 'expiry_type':np.nan}
+                         'issue_id': coupon['issue_id'], 'offer_id':coupon['offer_id'], 'member_id':batch_member_index_to_id[batch_member_index], 'batch_id':np.nan}
 
             not_accepted_coupons.append(event)
 
@@ -408,6 +529,26 @@ class IssueStreamSimulator:
 
 
     def send_out_chosen_coupons(self, allocated_member_coupon_pairs, batch_indices, batch_to_send, batch_sent_at, batch_ID):
+        """ Make events of which coupon was sent to which member. Some coupons might not have been allocated to
+        any member, so these can be readded to the queue
+        
+        Parameters
+        ---------
+        allocated_member_coupon_pairs : tuple[list[int], list[int]]
+        batch_indices : tuple[dict[int --> int], dict[int --> int]]
+        batch_to_send : list[dict]
+        batch_sent_at : dt.datetime
+        batch_ID : int
+        
+        Returns
+        -------
+        add_to_queue : list[dict]
+            A list of dictionaries, with each dictionary representing a coupon to allocate with the keys
+            [        'timestamp','coupon_id','coupon_follow_id','issue_id','offer_id']
+        sent_coupons : list[dict]
+            A list of dictionaries, with each dictionary representing an event with the keys
+            ['event','timestamp','coupon_id','coupon_follow_id','issue_id','offer_id','member_id','batch_id']
+        """
         # Unpack tuples
         batch_member_index_to_id, batch_coupon_index_to_id = batch_indices
         members_with_coupon_indices, allocated_coupon_indices = allocated_member_coupon_pairs
@@ -424,13 +565,27 @@ class IssueStreamSimulator:
             assert batch_coupon_index_to_id[batch_coupon_index] == batch_to_send[batch_coupon_index]['coupon_id']
             coupon = batch_to_send[batch_coupon_index]
             sent_coupon = {'event': Event.coupon_sent, 'timestamp':batch_sent_at, 'coupon_id':coupon['coupon_id'], 'coupon_follow_id':coupon['coupon_follow_id'],
-                           'issue_id': coupon['issue_id'], 'offer_id':coupon['offer_id'], 'member_id':batch_member_index_to_id[batch_member_index], 'batch_id':batch_ID, 'expiry_type':np.nan}
+                           'issue_id': coupon['issue_id'], 'offer_id':coupon['offer_id'], 'member_id':batch_member_index_to_id[batch_member_index], 'batch_id':batch_ID}
             sent_coupons.append(sent_coupon)
 
         return add_to_queue, sent_coupons
 
 
     def determine_coupon_allocation(self, utility_to_allocate, verbose):
+        """ Based on utility matrix, determine which members get which coupons
+
+        Parameters
+        ----------
+        utility_to_allocate : np.array
+            Each row x column is a combination of member x coupon, corresponding to the 
+            increase in utility of that member accepting that coupon
+
+        Returns
+        -------
+        X_a_r : np.array
+            A matrix of booleans, indicating which combinations of member x coupon has 
+            been chosen in the allocation. Rows are the agents / members, colums the resources / coupons
+        """
         original_utility_shape = utility_to_allocate.shape
 
         # Remove coupons without any eligible members from batch_utility for a speed-up
@@ -455,6 +610,29 @@ class IssueStreamSimulator:
 
 
     def filter_relevant_utilities(self, batch_to_send, batch_sent_at):
+        """ Function that filters from the full utility matrix, the utilities relevant to the batch
+        This depends both on the offer corresponding to coupons included in the batch,
+        and the set of eligible members per offer
+        The function can also adjust some of the utilities, dependent on the historical_context_type
+
+        Parameters
+        ----------
+        batch_to_send : list[dict]
+        batch_sent_at : dt.datetime
+
+        Returns
+        -------
+        utility_to_allocate : np.array
+            Filtered utilities with some utilities possibly adjusted based on historical context
+        actual_utility : np.array
+            Filtered utilities, with none of the utilities adjusted (all original values)
+
+        batch_indices : tuple containing:
+            member_index_to_id : dict[int --> int]
+                Mapping the row numbers of the utility matrices to member id
+            coupon_index_to_id : dict[int --> int]
+                Mapping the column numbers of the utility matrices to coupon id
+        """
         TrackTime("Filtering relevant utilies")
         member_id_to_index, offer_id_to_index = self.utility_indices
 
@@ -512,6 +690,13 @@ class IssueStreamSimulator:
 
 
     def extract_batch_from_queue(self, verbose):
+        """ Sort the queue of coupons, then extract the coupons that are part of the next batch
+
+        Returns
+        -------
+        batch_to_send : list[dict]
+        batch_sent_at : dt.datetime
+        """
         if len(self.unsorted_queue_of_coupons) <= self.min_batch_size:
             actual_batch_size = len(self.unsorted_queue_of_coupons)
             batch_sent_at = self.unsorted_queue_of_coupons[actual_batch_size-1]['timestamp']
@@ -533,6 +718,19 @@ class IssueStreamSimulator:
 
 
     def check_expiry_unsent_coupons(self, batch_sent_at, prev_batch_unsent_coupons, verbose):
+        """ Checks whether coupons that we NOT sent in the previous batch, can be retried in this
+        next batch, or whether the coupons have expired by now
+
+        Parameters
+        ----------
+        batch_sent_at : dt.datetime
+        prev_batch_unsent_coupons : list[dict]
+
+        Returns
+        -------
+        unsent_coupons_to_retry : list[dict]
+        unsent_coupons_now_expired : list[dict]
+        """
         # TODO: evaluate coupon expire also based on 'redeem_till' if 'redeem_type' in ['on_date', 'til_date']
         unsent_coupons_to_retry, unsent_coupons_now_expired = [], []
 
@@ -543,14 +741,14 @@ class IssueStreamSimulator:
                     unsent_coupons_to_retry.append(coupon)
                 else:
                     event = {'event': Event.coupon_expired, 'timestamp':self.issues.loc[coupon['issue_id'],'expires_at'], 'coupon_id':np.nan, 'coupon_follow_id':coupon['coupon_follow_id'],
-                             'issue_id': coupon['issue_id'], 'offer_id':coupon['offer_id'], 'member_id':np.nan, 'batch_id':np.nan, 'expiry_type':"while awaiting batch"}
+                             'issue_id': coupon['issue_id'], 'offer_id':coupon['offer_id'], 'member_id':np.nan, 'batch_id':np.nan}
                     unsent_coupons_now_expired.append(event)
             else:
                 if batch_sent_at < self.issues.loc[coupon['issue_id'],'expires_at']:
                     unsent_coupons_to_retry.append(coupon)
                 else:
                     event = {'event': Event.coupon_expired, 'timestamp':self.issues.loc[coupon['issue_id'],'expires_at'], 'coupon_id':np.nan, 'coupon_follow_id':coupon['coupon_follow_id'],
-                             'issue_id': coupon['issue_id'], 'offer_id':coupon['offer_id'], 'member_id':np.nan, 'batch_id':np.nan, 'expiry_type':"while awaiting batch"}
+                             'issue_id': coupon['issue_id'], 'offer_id':coupon['offer_id'], 'member_id':np.nan, 'batch_id':np.nan}
                     unsent_coupons_now_expired.append(event)
 
         if len(unsent_coupons_now_expired) > 0 and verbose:
@@ -561,6 +759,18 @@ class IssueStreamSimulator:
 
 
     def is_batch_ready_to_be_sent(self, issue_counter):
+        """ Returns True or False if the minimum batch size has been reached,
+        also looking at whether all issues that should have been released before
+        the batch timestamp, were actually released.
+
+        Parameters
+        ----------
+        issue_counter : int
+
+        Returns
+        -------
+         : bool
+        """
         if len(self.unsorted_queue_of_coupons) < self.min_batch_size:
             return False
 
@@ -578,6 +788,22 @@ class IssueStreamSimulator:
 
 
     def release_new_issue(self, issue):
+        """ Add a new issue to the queue of coupons, and make 'coupon_available' events
+
+        Parameters
+        ----------
+        issue : pd.Series
+            Should have the indice ['amount','sent_at','id','offer_id']
+
+        Returns
+        -------
+        add_to_queue : list[dict]
+            A list of dictionaries, with each dictionary representing a coupon to allocate with the keys
+            [        'timestamp','coupon_id','coupon_follow_id','issue_id','offer_id']
+        came_available_coupons : list[dict]
+            A list of dictionaries, with each dictionary representing an event with the keys
+            ['event','timestamp','coupon_id','coupon_follow_id','issue_id','offer_id','member_id','batch_id']
+        """
         new_coupon_ids        = np.arange(issue['amount']) + self.max_existing_coupon_id + 1
         new_coupon_follow_ids = np.arange(issue['amount']) + self.max_existing_coupon_follow_id + 1
         self.max_existing_coupon_id        += issue['amount']
@@ -589,13 +815,26 @@ class IssueStreamSimulator:
                           'issue_id': issue['id'], 'offer_id':issue['offer_id']}
             add_to_queue.append(new_coupon)
 
-        to_add = {'event': Event.coupon_available, 'member_id':np.nan, 'batch_id':np.nan, 'expiry_type':np.nan}
+        to_add = {'event': Event.coupon_available, 'member_id':np.nan, 'batch_id':np.nan}
         came_available_coupons = list(map(lambda my_dict: {**my_dict, **to_add}, add_to_queue))
 
         return add_to_queue, came_available_coupons
 
 
     def get_all_eligible_members(self, batch_to_send, batch_sent_at):
+        """ Function that gets for each coupon in the batch, a set of eligible members to which
+        the coupon can be sent to
+
+        Parameters
+        ---------
+        batch_to_send : list[dict]
+        batch_sent_at : dt.datetime
+
+        Returns
+        -------
+        offer_id_to_eligible_members : dict[int --> np.array]
+             A dictionary mapping the offer-id to a (time-dependent) set of eligible members
+        """
         members = self.members
 
         # Phone nr and email criteria already in effect
@@ -629,6 +868,24 @@ class IssueStreamSimulator:
 ################# GET ALL ELIGIBLE MEMBERS BASED ON HISTORICALLY RECEIVED COUPONS ########################################
 
     def get_eligible_members_historical_context(self, eligible_members, offer_id, nr_coupons_to_send, batch_sent_at, tracktime=False):
+        """ Function that filters out more ineligible members by utilizing historical context
+
+        Parameters
+        ----------
+        eligible_members : pd.DataFrame
+            Set of eligible members so far
+        offer_id : int
+        nr_coupons_to_send : int
+            The number of coupons in the same batch as this coupon
+        batch_sent_at : dt.datetime
+            To compute the numbers of days that have passed since the start of the simulation
+            Comparison of day_nr (float) is much faster than comparison of datetime objects
+
+        Returns
+        ------
+        eligible_members : pd.DataFrame
+            Set of eligible members for this particular offer and timestamp
+        """
 
         batch_sent_at_day_nr = (batch_sent_at - self.first_issue_sent_at).total_seconds() / 60 / 60 / 24
 
@@ -692,10 +949,27 @@ class IssueStreamSimulator:
         raise ValueError("Age not part of a child stage")
 
 
-    def get_eligible_members_time_dependent(self, eligible_members, offer, timestamp, verbose=False, tracktime=False):
+    def get_eligible_members_time_dependent(self, eligible_members, offer, batch_sent_at, verbose=False, tracktime=False):
+        """ Function that filters out more ineligible members by utilizing time-based criteria
+        and the timestamp at which the coupon will be sent.
+
+        Parameters
+        ----------
+        eligible_members : pd.DataFrame
+            Set of eligible members so far
+        offer : pd.DataFrame
+            Criteria that have to be filtered on
+        batch_sent_at : dt.datetime
+            The time at which the criteria have to be evaluated against (i.e. age at this timestamp to check 'min_age >= 18')
+
+        Returns
+        ------
+        eligible_members : pd.DataFrame
+            Set of eligible members for this particular offer and timestamp
+        """
         # TODO: use the columns 'inactivated_at', 'active', 'onboarded_at', 'receive_coupons_after', 'created_at' to determine eligible members
 
-        date_at = timestamp.date()
+        date_at = batch_sent_at.date()
         def calculate_age_at(date_born):
             return date_at.year - date_born.year - ((date_at.month, date_at.day) < (date_born.month, date_born.day))
 
@@ -816,6 +1090,18 @@ class IssueStreamSimulator:
         over (a short) time. In this case, because I only received a snapshot of the
         database at one point in time, these properties can physically not change.
         Things like: community, subscribed categories, gender, partners
+
+        Parameters
+        ----------
+        eligible_members : pd.DataFrame
+            Set of eligible members so far
+        offer : pd.DataFrame
+            Criteria that have to be filtered on
+
+        Returns
+        ------
+        eligible_members : pd.DataFrame
+            Set of eligible members for this particular offer
         """
 
         if tracktime: TrackTime("gender criteria")
@@ -849,13 +1135,15 @@ class IssueStreamSimulator:
 
 
     def init_new_sim(self):
+        """ Resets attributes for the start of a new simulation.
+        """
         # To be able to easily generate new unique coupon (follow) ids
         self.max_existing_coupon_id = -1
         self.max_existing_coupon_follow_id = -1
 
         # The list / df of events which will be exported in the end
         self.events_list = []
-        self.events_df = pd.DataFrame(columns=['event','timestamp','coupon_id','coupon_follow_id','issue_id','offer_id','member_id','batch_id','expiry_type'])
+        self.events_df = pd.DataFrame(columns=['event','timestamp','coupon_id','coupon_follow_id','issue_id','offer_id','member_id','batch_id'])
 
         # Initialize queue and define the columns of an element in the queue
         self.unsorted_queue_of_coupons = []
@@ -867,6 +1155,12 @@ class IssueStreamSimulator:
 
 
     def get_run_info(self, extra_run_info={}):
+        """
+        Returns
+        -------
+         : dict
+             Information about the properties of the simulation currently being run
+        """
         all_run_info = {'min_batch_size':       self.min_batch_size,
                         'alloc_procedure':      self.alloc_procedure_name,
                         'historical_context':   str(self.historical_context_type).replace('Historical_Context_Type.',''),
@@ -882,8 +1176,16 @@ class IssueStreamSimulator:
 
     @staticmethod
     def convert_utility_indices_and_values_to_dataframe(utility_indices, utility_values):
-        # Convert utility values and utility indices into a dataframe. The dataframe is not further used, as using a numpy array for the df.values and
-        # dictionaries for the columns and index works faster (since we are also going to be changing the df.values which goes faster with a np.array)
+        """ Function that can be used to combine a matrix of values, and member-ids and offer-ids into one dataframe
+        The dataframe is not used by the simulation, as using a numpy array for the df.values and
+        dictionaries for the columns and index works faster (since we are also going to be changing the df.values which goes faster with a np.array than pd.DataFrame)
+
+        Returns
+        -------
+        utility_df : pd.DataFrame
+            A dataframe with columns the offer-ids, and the index are the member-ids. Each combination of
+            member x offer has a value, corresponding to the increase in utility of that member accepting a coupon from that offer
+        """
         member_id_to_index, offer_id_to_index = utility_indices
         member_id_to_index = pd.DataFrame.from_dict(member_id_to_index, orient='index', columns=['index'])
         member_id_to_index = member_id_to_index.reset_index().rename(columns={'level_0':'member_id'}).sort_values(by='index')
@@ -896,28 +1198,27 @@ class IssueStreamSimulator:
 
 
     def export_run_info(self, all_run_info, run_nr):
+        """ Export info about the properties of the simulation, and the matrix of accept proabilities being used by the simulation
+        """
         run_export_folder = os.path.join(self.export_folder, "run_%d"%run_nr)
         if not os.path.exists(run_export_folder):
             os.makedirs(run_export_folder)
 
-        member_id_to_index, offer_id_to_index = self.utility_indices
+        # utility_df = self.convert_utility_indices_and_values_to_dataframe(self.utility_indices, self.utility_values)
+        # utility_df.to_pickle(os.path.join(run_export_folder, '%d_utility_df.pkl'%run_nr))
 
-        member_id_to_index = pd.DataFrame.from_dict(member_id_to_index, orient='index', columns=['index'])
-        member_id_to_index = member_id_to_index.reset_index().rename(columns={'level_0':'member_id'}).sort_values(by='index')
-        offer_id_to_index = pd.DataFrame.from_dict(offer_id_to_index, orient='index', columns=['index'])
-        offer_id_to_index = offer_id_to_index.reset_index().rename(columns={'level_0':'offer_id'}).sort_values(by='index')
-
-        assert np.all(offer_id_to_index['index'].values == np.arange(len(offer_id_to_index)))
-        assert np.all(member_id_to_index['index'].values == np.arange(len(member_id_to_index)))
-
-        utility_df = pd.DataFrame(self.utility_values, index=member_id_to_index['member_id'].values, columns=offer_id_to_index['offer_id'].values)
-
-        utility_df.to_pickle(os.path.join(run_export_folder, '%d_utility_df.pkl'%run_nr))
+        self.P_accept_df.to_pickle(os.path.join(run_export_folder, '%d_P_accept_df.pkl'%run_nr))
         with open(os.path.join(run_export_folder, '%d_info.json'%run_nr), 'w') as fp:
             json.dump(all_run_info, fp)
 
 
     def get_next_available_run_nr(self):
+        """ Read which run_nrs are already taken, and calculate next available run_nr
+
+        Returns
+        ------
+        run_nr : int
+        """
         subfolders_in_export_folder = list(filter(lambda name: os.path.isdir(self.export_folder + name), os.listdir(self.export_folder)))
         def extract_run_nr(folder_name):
             try:    return int(folder_name.split("_")[1])
@@ -939,6 +1240,28 @@ class Historical_Context:
 
     def update_with_batch_results(self, sent_coupons, accepted_coupons, not_accepted_coupons, days_passed_since_prev_batch,
                                   utility_values, utility_indices, first_issue_sent_at):
+        """ Function to update the historical context based on batch results
+        The batch results include which members have been offered which coupons,
+        which members accepted, which did not respond at all, and the times at which the events happened
+        
+        Parameters
+        ----------
+        sent_coupons : list[dict]
+            A list stating which coupons have been allocated to which members (not necessarily accepted)
+        accepted_coupons : list[dict]
+            A list stating which members ended up accepting their allocated coupons
+        not_accepted_coupons : list[dict]
+            A list stating which members did not accept their allocated coupons
+        days_passed_since_prev_batch : int
+            Whether the previous batch was sent on the previous day (i.e. before midnights).
+            More than one midnight could have passed since the previous batch
+        utility_values : np.array
+            Matrix of utility values for every member x offer combination
+        utility_indices : tuple[dict[int --> int]]
+            Mapping member-id and offer-id to utility_values index
+        first_issue_sent_at : dt.datetime
+            To compute the day number since start of simulation
+        """
         # Update time-discounted utilities with the number of days_passed_since_prev_batch
         self.time_discounted_utilities[:] = self.time_discounted_utilities * (TIME_DISCOUNT_RATIO ** days_passed_since_prev_batch)
         member_id_to_index, offer_id_to_index = utility_indices

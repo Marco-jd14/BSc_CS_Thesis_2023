@@ -23,6 +23,8 @@ def main():
 
 
 def update_overview_json():
+    """ Create one large json file that shows all run_nrs and their properties, for an overview
+    """
     overview = {}
     for run_nr in range(200):
         if os.path.exists(os.path.join(EXPORT_FOLDER, "run_%d"%run_nr)):
@@ -59,6 +61,10 @@ def update_overview_json():
 
 
 def rename_data_run_and_sim_nrs(source_run_nr, dest_run_nr, last_sim_nr=None, folder_nr=None):
+    """ Can rename data to a different run_nr and sim_nr
+    This function can for example come in useful when data was generated / simulated on two different
+    computers, and run_nrs are not unique anymore between the two computers.
+    """
     if folder_nr is None:
         folder_nr = source_run_nr
 

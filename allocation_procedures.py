@@ -237,40 +237,34 @@ def maximin_utility(Uar, verbose=False):
     # print(min_nonzero_U)
 
     maximin_utility = _convert_vars_to_value(Xar)
-    # return maximin_utility
+    return maximin_utility
+    # Or, alternatively:
     max_utility_with_min = max_sum_utility(Uar, verbose, min_nonzero_U)
-    return max_utility_with_min # maximin_utility
-
-
-
-
+    return max_utility_with_min
 
 
 
 
 def main():
+    """ Example code of using the three different allocation procedures and how they work """
     np.random.seed(0)
     nr_agents = 10
     nr_unique_resources = 5
     Uar = np.random.uniform(0,0.7,size=(nr_agents, nr_unique_resources))
 
-    # Uar = [[  -1,  -1,  -1, 0.7,  -1],
-    #        [  -1,  -1,  -1, 0.7,  -1],
-    #        [ 0.1, 0.2, 0.3,  -1, 0.7],
-    #        [0.15,0.25,0.35,  -1, 0.7]]
     Uar = [[ 0.8, 0.6, 0.2],
            [ 0.6, 0.1, 0.2],
            [ 0.2, 0.1, 0.1]]
     Uar = np.array(Uar)
-    print(Uar)
+    print("\nUtility matrix:\n", Uar, "\n")
 
     verbose = False
     X_a_r = greedy(Uar, verbose)
-    print("\n", X_a_r, np.sum(Uar * X_a_r), "\n")
+    print("\nGreedy results:\n", X_a_r, "\nSum of utilities:", np.sum(Uar * X_a_r), "\n")
     X_a_r = max_sum_utility(Uar, verbose)
-    print("\n", X_a_r, np.sum(Uar * X_a_r), "\n")
+    print("\nMax sum results:\n", X_a_r, "\nSum of utilities:", np.sum(Uar * X_a_r), "\n")
     X_a_r = maximin_utility(Uar, verbose)
-    print("\n", X_a_r, np.sum(Uar * X_a_r), "\n")
+    print("\nMaximin results:\n", X_a_r, "\nSum of utilities:", np.sum(Uar * X_a_r), "\n")
 
 if __name__ == '__main__':
     main()
